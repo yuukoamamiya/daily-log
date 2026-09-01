@@ -31,8 +31,8 @@ jobs:
         run: .\dist\portable\DailyLog\DailyLog.exe --smoke-test
       - name: Add human test launcher
         run: Copy-Item packaging\DailyLog-HumanTest.cmd dist\portable\DailyLog\DailyLog-HumanTest.cmd
-      - name: Package portable build
-        run: Compress-Archive -Path .\dist\portable\DailyLog -DestinationPath .\dist\DailyLog-portable.zip
+      - name: Package Windows portable build
+        run: Compress-Archive -Path .\dist\portable\DailyLog -DestinationPath .\dist\DailyLog-Windows-Portable.zip
       - name: Build PortableApps package
         shell: pwsh
         run: |
@@ -42,6 +42,6 @@ jobs:
         with:
           name: DailyLog-windows-portable
           path: |
-            dist/DailyLog-portable.zip
-            dist/portableapps/DailyLogPortable.zip
-            dist/portableapps/DailyLogPortable.paf.exe
+            dist/DailyLog-Windows-Portable.zip
+            dist/portableapps/DailyLog-PortableApps.zip
+            dist/portableapps/DailyLog-PortableApps.paf.exe

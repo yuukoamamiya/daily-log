@@ -10,13 +10,15 @@ Daily Log 是一个本地优先的个人生活记录工具，把记账、日记�
 
 ## 下载并使用
 
-普通 Windows 用户打开 [v0.1.0 Release](https://github.com/yuukoamamiya/daily-log/releases/tag/v0.1.0)，按需要选择：
+普通 Windows 用户打开 [v0.1.0 Release](https://github.com/yuukoamamiya/daily-log/releases/tag/v0.1.0)，按需要选择。v0.1.0 使用的是初始文件名：
 
 - `DailyLog-Setup-*.exe`：安装版，适合日常使用。
-- `DailyLog-portable.zip`：普通绿色版，解压后直接运行 `DailyLog.exe`。
+- `DailyLog-portable.zip`：普通 Windows 绿色版，解压后直接运行 `DailyLog.exe`。
 - `DailyLogPortable.zip`：PortableApps 格式压缩包。
 - `DailyLogPortable.paf.exe`：交给 PortableApps Platform 安装。
 - `SHA256SUMS.txt`：所有发布文件的 SHA-256 校验和。
+
+从下一版开始，CI 会使用更直观的名称：`DailyLog-Windows-Portable.zip` 是普通绿色版，`DailyLog-PortableApps.zip` 是 PortableApps 压缩包，`DailyLog-PortableApps.paf.exe` 是 PortableApps 安装包。
 
 安装版和绿色版都启动带系统托盘的桌面客户端，不需要单独安装 Python。安装版数据保存在 `%LOCALAPPDATA%\DailyLog`；绿色版默认把数据保存在程序目录下的 `data\`。升级或卸载安装版不会删除用户数据。
 

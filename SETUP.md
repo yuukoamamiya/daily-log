@@ -103,7 +103,7 @@ pyinstaller --noconfirm --clean packaging\DailyLog.spec
 $env:DAILY_LOG_BUILD_PORTABLE = "1"
 pyinstaller --noconfirm --clean --distpath dist\portable --workpath build\portable packaging\DailyLog.spec
 Copy-Item packaging\DailyLog-HumanTest.cmd dist\portable\DailyLog\DailyLog-HumanTest.cmd
-Compress-Archive -Path dist\portable\DailyLog -DestinationPath dist\DailyLog-portable.zip -Force
+Compress-Archive -Path dist\portable\DailyLog -DestinationPath dist\DailyLog-Windows-Portable.zip -Force
 ```
 
 绿色版目录为 `dist\portable\DailyLog`，直接运行其中的 `DailyLog.exe` 会把数据保存到同目录的 `data\`。其中的 `DailyLog-HumanTest.cmd` 是给人工验收已有数据用的特殊入口，默认指向已经存在的 `%LOCALAPPDATA%\DailyLog`；找不到 `daily-log.db` 时会拒绝启动，不会创建新数据。需要测试其他已有数据时，可先设置 `DAILY_LOG_EXISTING_DATA_DIR`。
@@ -118,4 +118,4 @@ Compress-Archive -Path dist\portable\DailyLog -DestinationPath dist\DailyLog-por
 python packaging\portableapps.py --app-dir dist\portable\DailyLog --output-dir dist\portableapps --tools-dir build\portableapps-tools --version 0.1.0
 ```
 
-脚本会按固定版本下载并校验 PortableApps.com Launcher 和 Installer，生成 `dist\portableapps\DailyLogPortable.zip` 与 `DailyLogPortable.paf.exe`。工具只放在本机构建缓存中，不提交到仓库。PortableApps 版的可写数据通过启动器指向包内 `Data\DailyLog`；升级只替换 `App`，不删除 `Data`。
+脚本会按固定版本下载并校验 PortableApps.com Launcher 和 Installer，生成 `dist\portableapps\DailyLog-PortableApps.zip` 与 `DailyLog-PortableApps.paf.exe`。工具只放在本机构建缓存中，不提交到仓库。PortableApps 版的可写数据通过启动器指向包内 `Data\DailyLog`；升级只替换 `App`，不删除 `Data`。

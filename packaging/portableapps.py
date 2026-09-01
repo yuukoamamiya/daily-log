@@ -19,6 +19,7 @@ from pathlib import Path
 
 APP_ID = "DailyLogPortable"
 APP_NAME = "Daily Log Portable"
+PACKAGE_NAME = "DailyLog-PortableApps"
 FORMAT_VERSION = "3.9"
 LAUNCHER_VERSION = "2.2.9"
 INSTALLER_VERSION = "3.9.18"
@@ -181,7 +182,7 @@ def _installer_config(version: str) -> str:
 !define PORTABLEAPPNAMEDOUBLEDAMPERSANDS \"{APP_NAME}\"
 !define APPID \"{APP_ID}\"
 !define VERSION \"{version}.0\"
-!define FILENAME \"{APP_ID}\"
+!define FILENAME \"{PACKAGE_NAME}\"
 !define FINISHPAGERUN \"{APP_ID}.exe\"
 !define CHECKRUNNING \"DailyLog.exe\"
 !define CLOSENAME \"Daily Log\"
@@ -265,7 +266,7 @@ def _generate_installer(staging: Path, installer_dir: Path, version: str) -> Pat
     _write_text(destination / "PortableApps.comInstallerConfig.nsh", _installer_config(version))
     _run([str(make_header), str(staging)])
     _run([str(makensis), "/V0", "PortableApps.comInstaller.nsi"], cwd=destination)
-    output = staging.parent / f"{APP_ID}.paf.exe"
+    output = staging.parent / f"{PACKAGE_NAME}.paf.exe"
     if not output.is_file():
         raise BuildError("PortableApps Installer 没有生成 .paf.exe。")
     return output
@@ -336,7 +337,7 @@ def build(*, app_dir: Path, output_dir: Path, tools_dir: Path, version: str) -> 
     other_dir = staging / "Other"
     if other_dir.exists() and not any(other_dir.iterdir()):
         other_dir.rmdir()
-    zip_path = output_dir / f"{APP_ID}.zip"
+    zip_path = output_dir / f"{PACKAGE_NAME}.zip"
     _zip_package(staging, zip_path)
     return zip_path, paf
 
