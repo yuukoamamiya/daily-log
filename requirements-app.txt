@@ -1,0 +1,6 @@
+# 发布客户端的最小运行依赖；不包含遗留 CLI 兼容工具。
+icalendar==7.2.2
+cryptography==50.0.0
+pywebview==5.4
+pystray==0.19.5
+Pillow==11.3.0

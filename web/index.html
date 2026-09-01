@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f4f5f2" />
+    <title>Daily Log · 生活工作台</title>
+    <link rel="stylesheet" href="/styles.css?v=20260830-5" />
+  </head>
+  <body>
+    <svg class="icon-sprite" aria-hidden="true">
+      <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+      <symbol id="i-calendar" viewBox="0 0 24 24"><path d="M6 2v4M18 2v4M3 9h18"/><rect x="3" y="4" width="18" height="17" rx="3"/></symbol>
+      <symbol id="i-wallet" viewBox="0 0 24 24"><path d="M4 7.5V6a2 2 0 0 1 2-2h12M4 7.5h15a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9.5a2 2 0 0 1 1-2Z"/><path d="M16 13h5"/></symbol>
+      <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17H6.5a2.5 2.5 0 0 0 0 5H20"/><path d="M4 4.5v17"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="5"/><path d="m8 12 2.7 2.7L16.5 9"/></symbol>
+      <symbol id="i-tick" viewBox="0 0 24 24"><path d="m6.5 12.5 3.4 3.4L17.8 8"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+      <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 2 1.7 5.1L19 9l-5.3 1.9L12 16l-1.7-5.1L5 9l5.3-1.9L12 2Z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/></symbol>
+      <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+      <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M18.5 9A7 7 0 0 0 6 6.5L4 9m2 6a7 7 0 0 0 12 2.5L20 15"/></symbol>
+      <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18h11a4 4 0 0 0 .6-7.96A7 7 0 0 0 5.2 8.2 5 5 0 0 0 7 18Z"/><path d="m9 13 3-3 3 3M12 10v7"/></symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H3v-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4a1.7 1.7 0 0 0 1-1.6V2h4v.4A1.7 1.7 0 0 0 15 4a1.7 1.7 0 0 0 1.9.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></symbol>
+    </svg>
+
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand">
+          <span class="brand-mark"><span></span><span></span><span></span><span></span></span>
+          <span>Daily Log</span>
+        </div>
+        <nav class="main-nav" aria-label="主导航">
+          <button class="nav-item active" data-route="overview"><svg><use href="#i-grid"/></svg><span>概览</span></button>
+          <button class="nav-item" data-route="calendar"><svg><use href="#i-calendar"/></svg><span>日历</span></button>
+          <button class="nav-item" data-route="expenses"><svg><use href="#i-wallet"/></svg><span>账目</span></button>
+          <button class="nav-item" data-route="diary"><svg><use href="#i-book"/></svg><span>日记</span></button>
+          <button class="nav-item" data-route="todos"><svg><use href="#i-check"/></svg><span>待办</span></button>
+          <button class="nav-item" data-route="settings"><svg><use href="#i-settings"/></svg><span>设置</span></button>
+        </nav>
+        <div class="sidebar-foot">
+          <div class="repo-state">
+            <span class="state-dot" id="backup-state-dot"></span>
+            <div><strong id="backup-state-title">本地数据</strong><small id="sidebar-updated">正在读取…</small></div>
+          </div>
+          <p id="backup-state-detail">本地保存优先，备份在后台独立进行</p>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <button class="icon-button mobile-menu" id="menu-button" aria-label="打开菜单"><svg><use href="#i-menu"/></svg></button>
+          <div class="page-heading">
+            <p id="page-eyebrow">生活工作台</p>
+            <h1 id="page-title">概览</h1>
+          </div>
+          <div class="top-actions">
+            <button class="backup-button" id="backup-button" type="button"><svg><use href="#i-cloud"/></svg><span>立即备份</span></button>
+            <button class="primary-button" data-open-composer="transaction"><svg><use href="#i-plus"/></svg><span>快速记录</span><kbd>N</kbd></button>
+          </div>
+        </header>
+
+        <section class="content" id="view-root" aria-live="polite">
+          <div class="loading-state"><span class="loader"></span><p>正在整理你的生活数据…</p></div>
+        </section>
+      </main>
+    </div>
+
+    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+    <aside class="day-detail-panel" id="day-detail-panel" aria-hidden="true" aria-label="当天详情">
+      <header class="composer-header">
+        <div><p>当天详情</p><h2 id="day-detail-title">记录</h2></div>
+        <button class="icon-button" id="close-day-detail" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
+      </header>
+      <div class="day-detail-body" id="day-detail-body"></div>
+    </aside>
+    <aside class="composer" id="composer" aria-hidden="true" aria-label="快速记录">
+      <header class="composer-header">
+        <div><p>快速记录</p><h2>记下此刻</h2></div>
+        <button class="icon-button" id="close-composer" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
+      </header>
+      <div class="composer-tabs" role="tablist">
+        <button class="composer-tab active" data-form="transaction">账目</button>
+        <button class="composer-tab" data-form="diary">日记</button>
+        <button class="composer-tab" data-form="todo">待办</button>
+        <button class="composer-tab" data-form="event">日程</button>
+        <button class="composer-tab ai-tab" data-form="ai"><svg><use href="#i-spark"/></svg>AI 录入</button>
+      </div>
+
+      <div class="form-stack">
+        <form class="entry-form active" id="form-transaction" data-kind="transaction">
+          <div class="form-intro coral"><svg><use href="#i-wallet"/></svg><div><strong>记录一笔支出</strong><span>金额和分类会保存到本地账本；也可以直接输入新分类</span></div></div>
+          <label>日期<input name="date" type="date" required /></label>
+          <label>消费项目<input name="summary" type="text" maxlength="120" placeholder="例如：午饭" required /></label>
+          <div class="field-row"><label>金额<input name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" required /></label><label>一级分类（可选）<select name="categoryParent"><option value="">未分类</option><option value="__new_parent__">＋ 新增一级分类…</option></select></label></div>
+          <label>二级分类（可选）<select name="categoryChild" disabled><option value="">先选择一级分类</option></select></label>
+          <div class="category-quick-add" id="category-quick-add" hidden><div class="category-quick-add-head"><strong id="category-quick-add-title">新增分类</strong><button type="button" class="text-button" data-category-quick-cancel>取消</button></div><label>分类名称<input id="category-quick-add-name" type="text" maxlength="40" placeholder="例如：医疗" /></label><button type="button" class="submit-button dark" data-category-quick-save>保存分类</button></div>
+          <label>备注<textarea name="note" rows="3" maxlength="500" placeholder="可选，记录消费细节"></textarea></label>
+          <button class="submit-button coral" type="submit">写入账本<svg><use href="#i-arrow"/></svg></button>
+        </form>
+
+        <form class="entry-form" id="form-diary" data-kind="diary">
+          <div class="form-intro violet"><svg><use href="#i-book"/></svg><div><strong>写一篇日记</strong><span>正文会原样写入，不做润色</span></div></div>
+          <label>日期<input name="date" type="date" required /></label>
+          <label>日记正文<textarea name="text" rows="9" maxlength="8000" placeholder="今天发生了什么？" required></textarea></label>
+          <label>标签（可选）<input name="tags" type="text" maxlength="120" placeholder="生活 工作（空格分隔）" /><small>可以留空，之后再编辑或让 AI 补充标签</small></label>
+          <button class="submit-button violet" type="submit">写入日记<svg><use href="#i-arrow"/></svg></button>
+        </form>
+
+        <form class="entry-form" id="form-todo" data-kind="todo">
+          <div class="form-intro amber"><svg><use href="#i-check"/></svg><div><strong>添加一项待办</strong><span>没有确定时间的未来行动</span></div></div>
+          <label>截止日期（可选）<input name="dueDate" type="date" /><small>超过这一天仍未完成时会标记为逾期</small></label>
+          <label>待办内容<textarea name="text" rows="4" maxlength="1000" placeholder="接下来要做什么？" required></textarea></label>
+          <label>标签<input name="tags" type="text" maxlength="120" placeholder="写作 工作（可选）" /></label>
+          <button class="submit-button amber" type="submit">添加待办<svg><use href="#i-arrow"/></svg></button>
+        </form>
+
+        <form class="entry-form" id="form-event" data-kind="event">
+          <div class="form-intro blue"><svg><use href="#i-calendar"/></svg><div><strong>添加一项日程</strong><span>确定日期的安排会写入本地 ICS</span></div></div>
+          <label>标题<input name="title" type="text" maxlength="200" placeholder="例如：去医院" required /></label>
+          <label>日期<input name="date" type="date" required /></label>
+          <label class="check-field"><input name="allDay" type="checkbox" checked /><span>全天日程</span></label>
+          <div class="field-row time-fields" hidden><label>开始<input name="startTime" type="time" /></label><label>结束<input name="endTime" type="time" /></label></div>
+          <label>地点<input name="location" type="text" maxlength="200" placeholder="可选" /></label>
+          <label>备注<textarea name="description" rows="3" maxlength="1000" placeholder="可选"></textarea></label>
+          <button class="submit-button blue" type="submit">添加日程<svg><use href="#i-arrow"/></svg></button>
+        </form>
+
+        <form class="entry-form" id="form-ai" data-kind="ai">
+          <div class="form-intro dark"><svg><use href="#i-spark"/></svg><div><strong>让 AI 帮你整理</strong><span>识别账目、日记、待办和日程后直接保存</span></div></div>
+          <label>想记录的内容<textarea name="text" rows="12" maxlength="20000" placeholder="可以把日记、消费、待办和日程混在一起说……" required></textarea></label>
+          <div class="issue-note"><span class="state-dot"></span><p>AI 处理完成后会直接写入本地数据库，写错的内容可以在对应页面修改。</p></div>
+          <button class="submit-button dark" type="submit">让 AI 处理并保存<svg><use href="#i-arrow"/></svg></button>
+        </form>
+      </div>
+    </aside>
+
+    <div class="onboarding-backdrop" id="onboarding-backdrop" hidden>
+      <section class="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+        <p class="onboarding-eyebrow">第一次使用</p>
+        <h2 id="onboarding-title">欢迎使用 Daily Log</h2>
+        <p class="onboarding-lead">这是一个保存在本机的生活记录工具。数据先保存到本地，网络服务和 AI 都可以以后再配置。</p>
+        <div class="onboarding-points">
+          <div><span>01</span><p><strong>数据位置</strong><small id="onboarding-data-path">正在读取…</small></p></div>
+          <div><span>02</span><p><strong>可选设置</strong><small>月度预算、AI 录入和远程备份都可以跳过，之后在“设置”里开启。</small></p></div>
+          <div><span>03</span><p><strong>随时可恢复</strong><small>建议首次录入后，在设置中完成一次本机备份。</small></p></div>
+        </div>
+        <label class="onboarding-budget">月度预算（可选）<input id="onboarding-budget" type="number" min="0" max="999999999.99" step="0.01" placeholder="例如：3000；留空则稍后设置" /></label>
+        <div class="onboarding-actions"><button class="text-button" type="button" data-onboarding-skip>跳过设置</button><button class="submit-button dark" type="button" data-onboarding-complete>开始使用<svg><use href="#i-arrow"/></svg></button></div>
+      </section>
+    </div>
+    <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+    <script type="module" src="/app.js?v=20260831-1"></script>
+  </body>
+</html>

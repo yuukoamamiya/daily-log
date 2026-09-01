@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+
+# 临时/日志
+*.tmp
+*.log
+.local-test-profile/
+.fresh-profile/
+
+# 安全扫描产物
+deepsec-report.json
+.deepsec-report.json
+
+# PyInstaller and local Windows build outputs
+/build/
+/dist/
+pac_installer_log.ini
+
+# 本地设计和密钥，不提交
+config/design.md
+config/secrets.env
+
+# 本机构建缓存
+/$out/

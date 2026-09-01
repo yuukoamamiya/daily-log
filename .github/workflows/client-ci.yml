@@ -1,0 +1,32 @@
+name: Universal client CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install universal client dependencies
+        run: python -m pip install -r requirements-app.txt
+      - name: Check universal client
+        env:
+          PYTHONUTF8: "1"
+        run: python -m unittest discover -s tests -v
+      - name: Check module entry point
+        run: python -m daily_log --help
+      - name: Check repository portability
+        run: python scripts/audit_portability.py

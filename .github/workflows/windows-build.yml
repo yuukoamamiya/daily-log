@@ -1,0 +1,47 @@
+name: Windows desktop build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install pinned build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Run client tests
+        env:
+          PYTHONUTF8: "1"
+        run: python -m unittest discover -s tests -v
+      - name: Build desktop client
+        env:
+          DAILY_LOG_BUILD_PORTABLE: "1"
+        run: pyinstaller --noconfirm --clean --distpath dist\portable --workpath build\portable packaging/DailyLog.spec
+      - name: Smoke test packaged executable
+        run: .\dist\portable\DailyLog\DailyLog.exe --smoke-test
+      - name: Add human test launcher
+        run: Copy-Item packaging\DailyLog-HumanTest.cmd dist\portable\DailyLog\DailyLog-HumanTest.cmd
+      - name: Package portable build
+        run: Compress-Archive -Path .\dist\portable\DailyLog -DestinationPath .\dist\DailyLog-portable.zip
+      - name: Build PortableApps package
+        shell: pwsh
+        run: |
+          $version = python -c "from daily_log.version import __version__; print(__version__)"
+          python packaging\portableapps.py --app-dir dist\portable\DailyLog --output-dir dist\portableapps --tools-dir build\portableapps-tools --version $version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DailyLog-windows-portable
+          path: |
+            dist/DailyLog-portable.zip
+            dist/portableapps/DailyLogPortable.zip
+            dist/portableapps/DailyLogPortable.paf.exe

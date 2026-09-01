@@ -1,0 +1,2 @@
+# Development and runtime dependencies for the SQLite client.
+-r requirements-app.txt

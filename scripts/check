@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# 运行项目的完整只读检查。
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -x "$ROOT/.venv/bin/python" ]; then
+  DL_PYTHON="$ROOT/.venv/bin/python"
+elif [ -x "$ROOT/.venv/Scripts/python.exe" ]; then
+  DL_PYTHON="$ROOT/.venv/Scripts/python.exe"
+else
+  DL_PYTHON="${PYTHON:-python3}"
+fi
+export PYTHONUTF8=1 PYTHONIOENCODING=UTF-8
+
+"$DL_PYTHON" -m unittest discover -s "$ROOT/tests" -v
+printf '全部检查通过。\n'
