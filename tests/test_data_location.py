@@ -55,7 +55,11 @@ class DataLocationTest(unittest.TestCase):
             root = Path(directory)
             local_app_data = root / "local"
             target = root / "profile"
-            with patch.dict(os.environ, {"LOCALAPPDATA": str(local_app_data)}, clear=False):
+            with patch.dict(
+                os.environ,
+                {"LOCALAPPDATA": str(local_app_data), "XDG_STATE_HOME": str(local_app_data)},
+                clear=False,
+            ):
                 write_redirect(target)
                 self.assertEqual(read_redirect(), target.resolve())
                 self.assertEqual(default_state_dir(), target.resolve())
