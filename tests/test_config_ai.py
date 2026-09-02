@@ -11,6 +11,17 @@ from daily_log.errors import ValidationError
 
 
 class LocalConfigTest(unittest.TestCase):
+    def test_theme_setting_defaults_persists_and_validates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = LocalConfig(Path(directory) / "config.ini")
+            self.assertEqual(config.public()["application"]["theme"], "system")
+            result = config.update({"application": {"theme": "dark"}})
+            self.assertEqual(result["application"]["theme"], "dark")
+            self.assertEqual(config.public()["application"]["theme"], "dark")
+            self.assertIn("theme = dark", config.portable_text())
+            with self.assertRaisesRegex(ValidationError, "主题"):
+                config.update({"application": {"theme": "sepia"}})
+
     def test_onboarding_is_incomplete_until_explicitly_completed(self):
         with tempfile.TemporaryDirectory() as directory:
             config = LocalConfig(Path(directory) / "config.ini")
@@ -31,20 +42,36 @@ class LocalConfigTest(unittest.TestCase):
                 },
                 "backup": {
                     "autoBackup": True, "idleSeconds": 45, "backend": "webdav",
-                    "includeData": True, "includeSecrets": False,
+                    "includeData": True,
                     "webdav": {"url": "https://dav.example.com/log", "username": "user", "password": "dav-secret"},
+                    "proxy": {"mode": "custom", "url": "http://127.0.0.1:7890", "username": "proxy-user", "password": "proxy-secret"},
                 },
             })
             self.assertTrue(result["ai"]["apiKeyConfigured"])
             self.assertTrue(result["backup"]["includeData"])
-            self.assertFalse(result["backup"]["includeSecrets"])
             self.assertNotIn("secret-value", json.dumps(result))
             self.assertEqual(config.ai_credentials()["api_key"], "secret-value")
             self.assertIn("api_key = secret-value", config.path.read_text(encoding="utf-8"))
             self.assertNotIn("secret-value", config.portable_text())
             self.assertNotIn("dav-secret", config.portable_text())
+            self.assertEqual(result["backup"]["proxy"]["mode"], "custom")
+            self.assertEqual(result["backup"]["proxy"]["username"], "proxy-user")
+            self.assertTrue(result["backup"]["proxy"]["passwordConfigured"])
+            self.assertEqual(config.backup_settings()["proxy"]["password"], "proxy-secret")
+            self.assertEqual(config.secrets()["backup_proxy"]["password"], "proxy-secret")
+            self.assertIn("http://127.0.0.1:7890", config.portable_text())
+            self.assertNotIn("proxy-user", config.portable_text())
+            self.assertNotIn("proxy-secret", config.portable_text())
             self.assertIn("https://dav.example.com/log", config.portable_text())
             self.assertIn("model = deepseek-chat", config.portable_text())
+
+    def test_custom_proxy_requires_a_plain_http_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = LocalConfig(Path(directory) / "config.ini")
+            with self.assertRaisesRegex(ValidationError, "代理地址"):
+                config.update({"backup": {"proxy": {"mode": "custom", "url": "socks5://127.0.0.1:1080"}}})
+            with self.assertRaisesRegex(ValidationError, "内嵌用户名密码"):
+                config.update({"backup": {"proxy": {"mode": "custom", "url": "http://user:pass@127.0.0.1:7890"}}})
 
     def test_secrets_and_whole_backup_encryption_are_independent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -52,18 +79,16 @@ class LocalConfigTest(unittest.TestCase):
             result = config.update({
                 "backup": {
                     "includeData": True,
-                    "includeSecrets": True,
                     "encryptBackup": False,
                     "backend": "local",
                     "idleSeconds": 60,
                 },
             })
-            self.assertTrue(result["backup"]["includeSecrets"])
+            self.assertNotIn("includeSecrets", result["backup"])
             self.assertFalse(result["backup"]["encryptBackup"])
             with self.assertRaisesRegex(ValidationError, "备份密码"):
                 config.update({"backup": {
                     "includeData": True,
-                    "includeSecrets": False,
                     "encryptBackup": True,
                     "backend": "local",
                     "idleSeconds": 60,

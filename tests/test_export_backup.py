@@ -2,9 +2,10 @@ import io
 import json
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from daily_log.backup_archive import (
     decrypt_archive,
@@ -162,6 +163,20 @@ class ExportBackupTest(unittest.TestCase):
         self.assertTrue(requests[0].get_header("Authorization").startswith("Basic "))
         self.assertEqual(requests[1].method, "PUT")
         self.assertTrue(requests[1].get_header("Authorization").startswith("AWS4-HMAC-SHA256 "))
+
+    def test_custom_proxy_is_used_and_transient_connection_errors_are_retried(self):
+        archive = create_portable_archive(self.database, destination=self.root)
+        opener = Mock()
+        opener.open.side_effect = [urllib.error.URLError("temporary"), FakeResponse()]
+        with patch("daily_log.cloud_backup.urllib.request.build_opener", return_value=opener) as build_opener:
+            upload_webdav(archive, {
+                "url": "https://dav.example.com/log", "username": "u", "password": "p",
+                "proxy": {"mode": "custom", "url": "http://127.0.0.1:7890", "username": "pu", "password": "pp"},
+            })
+        self.assertEqual(opener.open.call_count, 2)
+        proxy_handler = build_opener.call_args.args[0]
+        self.assertEqual(proxy_handler.proxies, {"http": "http://127.0.0.1:7890", "https": "http://127.0.0.1:7890"})
+        self.assertEqual(len(build_opener.call_args.args), 2)
 
     def test_cloud_backends_reject_private_network_targets(self):
         archive = create_portable_archive(self.database, destination=self.root)

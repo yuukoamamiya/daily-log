@@ -1,61 +1,47 @@
 # Daily Log
 
-Daily Log 是一个本地优先的个人生活记录工具，把记账、日记、待办和日程放在同一个界面里。SQLite 是本地唯一真源；不配置 AI 或网络服务也可以完整使用。
+[![CI](https://github.com/yuukoamamiya/daily-log/actions/workflows/client-ci.yml/badge.svg)](https://github.com/yuukoamamiya/daily-log/actions/workflows/client-ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/yuukoamamiya/daily-log)](https://github.com/yuukoamamiya/daily-log/releases)
 
-当前稳定版本为 `v0.1.0`，Windows 安装包、绿色版和 PortableApps 版已经通过 CI 构建并发布。
+Daily Log 是一个本地优先的个人生活记录客户端，把记账、日记、待办和日程放在同一个界面里。所有记录首先保存到本机 SQLite；不配置 AI、不连接网络，也可以完整使用。
 
-- 公开仓库：<https://github.com/yuukoamamiya/daily-log>
-- `v0.1.0` 下载：<https://github.com/yuukoamamiya/daily-log/releases/tag/v0.1.0>
-- 全部 Releases：<https://github.com/yuukoamamiya/daily-log/releases>
+项目地址：[github.com/yuukoamamiya/daily-log](https://github.com/yuukoamamiya/daily-log)
 
-## 下载并使用
+当前版本：`v0.1.0`
 
-普通 Windows 用户打开 [v0.1.0 Release](https://github.com/yuukoamamiya/daily-log/releases/tag/v0.1.0)，按需要选择。v0.1.0 使用的是初始文件名：
+## 适合记录什么
+
+- 记账：月度预算、预算外支出、一级/二级分类和未分类账目。
+- 日记：正文原样保存，标签可选。
+- 待办：可选截止日期、逾期高亮、快速改期和完成恢复。
+- 日程：月历、本地 ICS 日程和只读外部 ICS 订阅。
+- 搜索与整理：全局搜索、列表筛选、批量设置账目分类和记录标签，修改前提供预览。
+- AI 录入与历史复核：AI 只作为可选 Provider；复核建议确认后才写入，不能改写日记正文、日期、金额或摘要。
+- 备份与恢复：本机 ZIP、WebDAV 和 S3 兼容存储。
+- 导出：CSV、Markdown、todo.txt、ICS 和 Org Mode。
+- 界面：浅色、深色和跟随系统；Windows 客户端支持系统托盘。
+
+## 下载 Windows 版本
+
+打开 [Releases](https://github.com/yuukoamamiya/daily-log/releases)，按使用方式选择：
 
 - `DailyLog-Setup-*.exe`：安装版，适合日常使用。
-- `DailyLog-portable.zip`：普通 Windows 绿色版，解压后直接运行 `DailyLog.exe`。
-- `DailyLogPortable.zip`：PortableApps 格式压缩包。
-- `DailyLogPortable.paf.exe`：交给 PortableApps Platform 安装。
-- `SHA256SUMS.txt`：所有发布文件的 SHA-256 校验和。
+- `DailyLog-Windows-Portable.zip`：普通绿色版，解压后运行 `DailyLog.exe`。
+- `DailyLog-PortableApps.zip`：PortableApps 格式压缩包。
+- `DailyLog-PortableApps.paf.exe`：交给 PortableApps Platform 安装。
+- `SHA256SUMS.txt`：发布文件的 SHA-256 校验和。
 
-从下一版开始，CI 会使用更直观的名称：`DailyLog-Windows-Portable.zip` 是普通绿色版，`DailyLog-PortableApps.zip` 是 PortableApps 压缩包，`DailyLog-PortableApps.paf.exe` 是 PortableApps 安装包。
+发布版不需要另行安装 Python。安装版和绿色版启动的是带系统托盘的桌面客户端，而不是只打开浏览器的网页入口。
 
-安装版和绿色版都启动带系统托盘的桌面客户端，不需要单独安装 Python。安装版数据保存在 `%LOCALAPPDATA%\DailyLog`；绿色版默认把数据保存在程序目录下的 `data\`。升级或卸载安装版不会删除用户数据。
+安装版数据保存在 `%LOCALAPPDATA%\DailyLog`，升级或卸载不会删除用户数据。绿色版默认把数据保存在程序旁边的 `data\`；PortableApps 版把数据保存在包内的 `Data\DailyLog`，更新时只替换 `App`，数据会保留。
 
-PortableApps 版的数据保存在包内的 `Data\DailyLog`，更新程序时只替换 `App`，数据会保留。它同样启动桌面客户端，而不是只打开浏览器网页。
+窗口关闭时，客户端会先完成必要的本地整理；如有待备份内容，会尝试执行一次限时备份。备份失败不会阻塞退出，下一次启动会继续提示待备份。
 
-## 功能
+## 从源码运行
 
-- 记账：月度预算、预算外支出、一级/二级分类和未分类记录。
-- 日记：正文原样保存，标签可选，也可以事后编辑或让 AI 补充标签。
-- 待办：可选截止日期、逾期高亮、快速改期，以及近期完成记录的恢复。
-- 日程：月历、本地 ICS 投影和外部 ICS 订阅。
-- AI 录入：调用用户在本机配置的兼容 OpenAI API；不依赖 GitHub Issue。
-- 备份恢复：本机 ZIP、WebDAV 和 S3 兼容存储。
-- 导出：账目 CSV、日记 Markdown、todo.txt、ICS 和 Org。
-- 日历交互：点击日期打开当天详情，可分别查看和编辑当天的四类记录；新增操作使用独立按钮。
+需要 Python 3.11 或更高版本。
 
-## 数据位置与隐私
-
-首次启动会创建空数据库，不会读取源码仓库、Git 状态、README 或其他用户文件。客户端也不要求 GitHub 账号，不会把个人记录上传到本项目的 GitHub 仓库。
-
-默认数据目录如下：
-
-- Windows：`%LOCALAPPDATA%\DailyLog`
-- Linux：`$XDG_STATE_HOME/DailyLog`；未设置时为 `~/.local/state/DailyLog`
-
-数据目录中的主要内容：
-
-- `daily-log.db`：SQLite 数据库，唯一可写真源。
-- `config.ini`：本机设置；API 密钥和远程备份凭据只保存在用户本机。
-- `portable/`：后台从数据库生成的便携文本投影。
-- `backups/`、`exports/`：本机备份和导出文件。
-
-可以通过设置页的“高级设置 → 数据目录”迁移整套数据，也可以用 `--data-dir` 或 `DAILY_LOG_STATE_DIR` 指定目录。迁移只接受空目标目录，并会在迁移前留下安全副本。
-
-## 从源码启动
-
-需要 Python 3.11 或更高版本：
+Windows：
 
 ```powershell
 python -m venv .venv
@@ -63,42 +49,74 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m daily_log
 ```
 
-默认会打开 <http://127.0.0.1:8765>。只启动后台服务：
+Linux/macOS：
 
-```powershell
-.\.venv\Scripts\python.exe -m daily_log --no-browser
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m daily_log
 ```
 
-使用隔离的数据目录：
+默认会启动本地服务并打开 `http://127.0.0.1:8765`。只启动服务、不自动打开浏览器：
 
-```powershell
-.\.venv\Scripts\python.exe -m daily_log --data-dir C:\path\to\daily-log-data
+```bash
+python -m daily_log --no-browser
 ```
 
-源码入口 `python -m daily_log`、桌面入口和发布版使用同一套 SQLite 核心。手动录入不需要 AI 配置。
+开发或测试时使用隔离数据目录：
+
+```bash
+python -m daily_log --data-dir <隔离目录>
+```
+
+手动录入不需要 AI 配置。AI、备份和日历订阅都可以在设置页按需启用。
+
+## 数据和隐私
+
+SQLite 是客户端唯一可写真源。默认启动会创建空数据库，不会扫描源码仓库，也不会读取 README、Git 状态或 GitHub Issue；个人记录不会上传到本项目的 GitHub 仓库。
+
+默认数据目录：
+
+- Windows：`%LOCALAPPDATA%\DailyLog`
+- Linux/macOS：`$XDG_STATE_HOME/DailyLog`；未设置时为 `~/.local/state/DailyLog`
+
+数据目录主要包含：
+
+- `daily-log.db`：SQLite 数据库，唯一可写真源。
+- `config.ini`：本机设置、AI 配置、备份配置和日历订阅。
+- `portable/`：由数据库后台生成的文本投影。
+- `backups/`：本机备份归档。
+- `exports/`：导出文件。
+- `restore-safety/`：恢复或迁移前生成的安全副本。
+
+API Key、WebDAV/S3 凭据和代理凭据只保存在用户数据目录，不会写入源码仓库。备份默认会携带这些设置；“加密整个备份”是独立选项。发布包和默认数据模板不包含任何用户密钥。
 
 ## 从旧版本迁移
 
-早期版本使用 hledger、jrnl、todo.txt 和 khal；这些工具不是当前客户端的运行依赖，也不会在默认启动时被调用。若仍保留旧版本数据，只有在新数据目录尚未初始化时，显式指定 `--migrate-from` 才会执行一次性迁移：
+旧版文本数据只有在用户显式提供 `--migrate-from` 时才会导入，而且只能导入一次：
 
-```powershell
-.\.venv\Scripts\python.exe -m daily_log --migrate-from "C:\path\to\old-daily-log"
+```bash
+python -m daily_log --migrate-from "<旧版数据目录>"
 ```
 
-已经初始化的目录会拒绝再次迁移，避免重复记录或覆盖现有数据。日常备份和恢复请使用客户端自己的备份功能。
+目标数据目录已经初始化时，程序会拒绝重复迁移，以避免重复记录或覆盖现有数据。日常备份和恢复请使用客户端自己的备份功能。
 
-## 开发与发布
+## 开发和发布
 
 本地完整检查：
 
 ```bash
 bash scripts/check
+git diff --check
+node --check web/app.js
 ```
 
-开发环境、测试和目录说明见 [SETUP.md](SETUP.md)，后续路线见 [TODO.md](TODO.md)。
+开发环境、目录结构和 Windows 构建说明见 [SETUP.md](SETUP.md)，未完成路线见 [TODO.md](TODO.md)。
 
-每次提交和 Pull Request 会运行客户端测试与 Windows 构建。推送匹配 `vMAJOR.MINOR.PATCH` 的标签时，GitHub Actions 会校验源码版本、运行测试、构建并发布安装版、绿色版、PortableApps 包和 SHA-256 校验和。
+GitHub Actions 会在普通提交和 Pull Request 中运行测试与 Windows 构建；只有推送形如 `vMAJOR.MINOR.PATCH` 的标签时才创建正式 Release。标签版本必须与 `daily_log/version.py` 一致，Release 包含安装版、绿色版、PortableApps 包和校验和。
+
+第三方任务、日历、笔记、提醒和自动化服务的双向同步目前尚未实现；本地 SQLite 始终是未来连接器的真源。
 
 ## 许可证
 
-项目许可证见 [LICENSE](LICENSE)，第三方依赖说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目使用 [MIT License](LICENSE)。第三方依赖和许可证说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

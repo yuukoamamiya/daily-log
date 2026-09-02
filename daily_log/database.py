@@ -18,11 +18,11 @@ from typing import Iterator
 
 from .errors import ConflictError, NotFoundError, ValidationError
 from .data_location import read_redirect, system_default_state_dir
-from .models import normalize_item, normalize_plan
+from .models import ACCOUNT_RE, normalize_item, normalize_plan, normalize_tags
 from .storage import CalendarRepository, DiaryRepository, LedgerRepository, TodoRepository
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_MONTHLY_BUDGET = Decimal("3000.00")
 
 
@@ -170,6 +170,42 @@ class DailyLogDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(id);
                 CREATE INDEX IF NOT EXISTS idx_todos_completed ON todos(completed, completed_date);
+                CREATE TABLE IF NOT EXISTS organizer_reviews (
+                    id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    month TEXT,
+                    status TEXT NOT NULL,
+                    total_batches INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS organizer_review_batches (
+                    review_id TEXT NOT NULL,
+                    batch_number INTEGER NOT NULL,
+                    records_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    suggestions_json TEXT NOT NULL DEFAULT '{}',
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (review_id, batch_number)
+                );
+                CREATE INDEX IF NOT EXISTS idx_organizer_reviews_updated ON organizer_reviews(updated_at DESC);
+                CREATE TABLE IF NOT EXISTS organizer_change_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    review_id TEXT,
+                    entity_kind TEXT NOT NULL,
+                    entity_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    entry_date TEXT NOT NULL,
+                    field TEXT NOT NULL,
+                    before_value TEXT NOT NULL,
+                    after_value TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_organizer_change_log_applied ON organizer_change_log(applied_at DESC, id DESC);
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(transactions)")}
@@ -437,6 +473,287 @@ class DailyLogDatabase:
         with self.transaction() as connection:
             self._update(connection, kind, identifier, item)
         return item
+
+    def apply_organizer(
+        self,
+        transactions: object,
+        diary: object,
+        todos: object = None,
+        *,
+        allow_existing: bool = False,
+        review_id: str | None = None,
+    ) -> dict:
+        """Apply category/tag-only organizer changes in one SQLite transaction."""
+        if not isinstance(transactions, list) or not isinstance(diary, list):
+            raise ValidationError("整理修改格式无效。")
+        if todos is None:
+            todos = []
+        if not isinstance(todos, list):
+            raise ValidationError("整理待办格式无效。")
+        transaction_updates: list[tuple[str, str]] = []
+        diary_updates: list[tuple[str, list[str]]] = []
+        todo_updates: list[tuple[str, list[str]]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw in transactions:
+            if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+                raise ValidationError("整理账目格式无效。")
+            identifier = str(raw["id"]).strip()
+            key = ("transaction", identifier)
+            if key in seen:
+                raise ValidationError("整理列表中有重复账目。")
+            seen.add(key)
+            account = str(raw.get("account") or "").strip()
+            if not account:
+                account = "expenses"
+            if account != "expenses" and not ACCOUNT_RE.fullmatch(account):
+                raise ValidationError("账目分类格式无效。")
+            transaction_updates.append((identifier, account))
+        for raw in diary:
+            if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+                raise ValidationError("整理日记格式无效。")
+            identifier = str(raw["id"]).strip()
+            key = ("diary", identifier)
+            if key in seen:
+                raise ValidationError("整理列表中有重复日记。")
+            seen.add(key)
+            diary_updates.append((identifier, normalize_tags(raw.get("tags"))))
+        for raw in todos:
+            if not isinstance(raw, dict) or not str(raw.get("id") or "").strip():
+                raise ValidationError("整理待办格式无效。")
+            identifier = str(raw["id"]).strip()
+            key = ("todo", identifier)
+            if key in seen:
+                raise ValidationError("整理列表中有重复待办。")
+            seen.add(key)
+            todo_updates.append((identifier, normalize_tags(raw.get("tags"))))
+
+        changed = {"transactions": 0, "diary": 0, "todos": 0}
+        with self.transaction() as connection:
+            transaction_rows: list[tuple[sqlite3.Row, str]] = []
+            for identifier, account in transaction_updates:
+                row = self._find_row(connection, "transaction", identifier)
+                if not allow_existing and row["account"] != "expenses":
+                    raise ConflictError("有账目已经完成分类，请刷新整理页后重试。")
+                transaction_rows.append((row, account))
+            diary_rows: list[tuple[sqlite3.Row, list[str]]] = []
+            for identifier, tags in diary_updates:
+                row = self._find_row(connection, "diary", identifier)
+                if not allow_existing and _tags(row["tags_json"]):
+                    raise ConflictError("有日记已经添加标签，请刷新整理页后重试。")
+                diary_rows.append((row, tags))
+            todo_rows: list[tuple[sqlite3.Row, list[str]]] = []
+            for identifier, tags in todo_updates:
+                row = self._find_row(connection, "todo", identifier)
+                if not allow_existing and _tags(row["tags_json"]):
+                    raise ConflictError("有待办已经添加标签，请刷新整理页后重试。")
+                todo_rows.append((row, tags))
+
+            for row, account in transaction_rows:
+                stamp = _now()
+                if review_id and row["account"] != account:
+                    connection.execute(
+                        "INSERT INTO organizer_change_log(review_id,entity_kind,entity_id,label,entry_date,field,before_value,after_value,applied_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
+                        (review_id, "transaction", row["id"], row["summary"], row["entry_date"], "分类",
+                         row["account"], account, stamp),
+                    )
+                connection.execute(
+                    "UPDATE transactions SET account=?,updated_at=? WHERE id=?",
+                    (account, stamp, row["id"]),
+                )
+                self._ensure_category(connection, account)
+                self._enqueue(connection, "transaction", row["id"], "update", {
+                    "date": row["entry_date"], "summary": row["summary"], "note": row["note"],
+                    "amount": row["amount"], "account": account,
+                    "budget_excluded": bool(row["budget_excluded"]),
+                })
+                changed["transactions"] += 1
+            for row, tags in diary_rows:
+                stamp = _now()
+                before_tags = _tags(row["tags_json"])
+                if review_id and before_tags != tags:
+                    connection.execute(
+                        "INSERT INTO organizer_change_log(review_id,entity_kind,entity_id,label,entry_date,field,before_value,after_value,applied_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
+                        (review_id, "diary", row["id"], row["text"][:80], row["entry_date"], "标签",
+                         json.dumps(before_tags, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), stamp),
+                    )
+                connection.execute(
+                    "UPDATE diary_entries SET tags_json=?,updated_at=? WHERE id=?",
+                    (json.dumps(tags, ensure_ascii=False), stamp, row["id"]),
+                )
+                self._enqueue(connection, "diary", row["id"], "update", {
+                    "date": row["entry_date"], "time": row["entry_time"], "text": row["text"], "tags": tags,
+                })
+                changed["diary"] += 1
+            for row, tags in todo_rows:
+                stamp = _now()
+                before_tags = _tags(row["tags_json"])
+                if review_id and before_tags != tags:
+                    connection.execute(
+                        "INSERT INTO organizer_change_log(review_id,entity_kind,entity_id,label,entry_date,field,before_value,after_value,applied_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
+                        (review_id, "todo", row["id"], row["text"][:80], row["created_date"], "标签",
+                         json.dumps(before_tags, ensure_ascii=False), json.dumps(tags, ensure_ascii=False), stamp),
+                    )
+                connection.execute(
+                    "UPDATE todos SET tags_json=?,updated_at=? WHERE id=?",
+                    (json.dumps(tags, ensure_ascii=False), stamp, row["id"]),
+                )
+                self._enqueue(connection, "todo", row["id"], "update", {
+                    "created_date": row["created_date"], "due_date": row["due_date"],
+                    "text": row["text"], "tags": tags,
+                })
+                changed["todos"] += 1
+        return changed
+
+    def create_organizer_review(self, scope: str, month: str | None, batches: list[dict]) -> str:
+        if not batches:
+            raise ValidationError("没有可供 AI 复核的记录。")
+        review_id = self._new_id("review")
+        stamp = _now()
+        with self.transaction() as connection:
+            connection.execute(
+                "INSERT INTO organizer_reviews(id,scope,month,status,total_batches,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (review_id, scope, month, "pending", len(batches), stamp, stamp),
+            )
+            for number, records in enumerate(batches, 1):
+                connection.execute(
+                    "INSERT INTO organizer_review_batches(review_id,batch_number,records_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    (review_id, number, json.dumps(records, ensure_ascii=False), "pending", stamp, stamp),
+                )
+        return review_id
+
+    @staticmethod
+    def _organizer_suggestions(value: str) -> dict:
+        try:
+            parsed = json.loads(value or "{}")
+        except json.JSONDecodeError:
+            return {"transactions": [], "diary": [], "todos": []}
+        return parsed if isinstance(parsed, dict) else {"transactions": [], "diary": [], "todos": []}
+
+    def organizer_review(self, review_id: str) -> dict:
+        with self.session() as connection:
+            review = connection.execute("SELECT * FROM organizer_reviews WHERE id=?", (review_id,)).fetchone()
+            if review is None:
+                raise NotFoundError("复核批次不存在或已经过期。")
+            batches = connection.execute(
+                "SELECT * FROM organizer_review_batches WHERE review_id=? ORDER BY batch_number", (review_id,)
+            ).fetchall()
+        batch_data = [{
+            "number": row["batch_number"], "status": row["status"], "attempts": row["attempts"],
+            "error": row["last_error"], "suggestions": self._organizer_suggestions(row["suggestions_json"]),
+        } for row in batches]
+        suggestions = {"transactions": [], "diary": [], "todos": []}
+        for batch in batch_data:
+            for key in suggestions:
+                suggestions[key].extend(batch["suggestions"].get(key, []))
+        completed = sum(batch["status"] == "completed" for batch in batch_data)
+        failed = sum(batch["status"] == "failed" for batch in batch_data)
+        return {
+            "id": review["id"], "scope": review["scope"], "month": review["month"],
+            "status": review["status"], "totalBatches": len(batch_data),
+            "completedBatches": completed, "failedBatches": failed,
+            "progress": completed / len(batch_data) if batch_data else 0,
+            "lastError": review["last_error"], "suggestions": suggestions, "batches": batch_data,
+        }
+
+    def claim_organizer_batch(self, review_id: str) -> dict | None:
+        stamp = _now()
+        with self.transaction() as connection:
+            review = connection.execute("SELECT * FROM organizer_reviews WHERE id=?", (review_id,)).fetchone()
+            if review is None:
+                raise NotFoundError("复核批次不存在或已经过期。")
+            row = connection.execute(
+                "SELECT * FROM organizer_review_batches WHERE review_id=? AND status='pending' ORDER BY batch_number LIMIT 1",
+                (review_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE organizer_review_batches SET status='running',attempts=attempts+1,updated_at=?,last_error=NULL WHERE review_id=? AND batch_number=?",
+                (stamp, review_id, row["batch_number"]),
+            )
+            connection.execute(
+                "UPDATE organizer_reviews SET status='running',updated_at=?,last_error=NULL WHERE id=?",
+                (stamp, review_id),
+            )
+        return {"number": row["batch_number"], "records": json.loads(row["records_json"])}
+
+    def complete_organizer_batch(self, review_id: str, batch_number: int, suggestions: dict) -> None:
+        stamp = _now()
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE organizer_review_batches SET status='completed',suggestions_json=?,last_error=NULL,updated_at=? WHERE review_id=? AND batch_number=?",
+                (json.dumps(suggestions, ensure_ascii=False), stamp, review_id, batch_number),
+            )
+            remaining = connection.execute(
+                "SELECT COUNT(*) AS count FROM organizer_review_batches WHERE review_id=? AND status<>'completed'",
+                (review_id,),
+            ).fetchone()["count"]
+            connection.execute(
+                "UPDATE organizer_reviews SET status=?,updated_at=?,last_error=NULL WHERE id=?",
+                ("completed" if not remaining else "running", stamp, review_id),
+            )
+
+    def fail_organizer_batch(self, review_id: str, batch_number: int, error: str) -> None:
+        stamp = _now()
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE organizer_review_batches SET status='failed',last_error=?,updated_at=? WHERE review_id=? AND batch_number=?",
+                (error[:1000], stamp, review_id, batch_number),
+            )
+            connection.execute(
+                "UPDATE organizer_reviews SET status='failed',last_error=?,updated_at=? WHERE id=?",
+                (error[:1000], stamp, review_id),
+            )
+
+    def retry_organizer_review(self, review_id: str) -> None:
+        stamp = _now()
+        with self.transaction() as connection:
+            review = connection.execute("SELECT id FROM organizer_reviews WHERE id=?", (review_id,)).fetchone()
+            if review is None:
+                raise NotFoundError("复核批次不存在或已经过期。")
+            failed = connection.execute(
+                "SELECT COUNT(*) AS count FROM organizer_review_batches WHERE review_id=? AND status='failed'",
+                (review_id,),
+            ).fetchone()["count"]
+            if not failed:
+                raise ValidationError("当前没有需要重试的复核批次。")
+            connection.execute(
+                "UPDATE organizer_review_batches SET status='pending',last_error=NULL,updated_at=? WHERE review_id=? AND status='failed'",
+                (stamp, review_id),
+            )
+            connection.execute(
+                "UPDATE organizer_reviews SET status='pending',last_error=NULL,updated_at=? WHERE id=?",
+                (stamp, review_id),
+            )
+
+    def list_organizer_changes(self, limit: int = 30) -> list[dict]:
+        limit = max(1, min(int(limit), 100))
+        with self.session() as connection:
+            rows = connection.execute(
+                "SELECT * FROM organizer_change_log ORDER BY applied_at DESC,id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        result = []
+        for row in rows:
+            before = row["before_value"]
+            after = row["after_value"]
+            if row["field"] == "标签":
+                try:
+                    before = json.loads(before)
+                except json.JSONDecodeError:
+                    before = []
+                try:
+                    after = json.loads(after)
+                except json.JSONDecodeError:
+                    after = []
+            result.append({
+                "id": row["id"], "reviewId": row["review_id"], "kind": row["entity_kind"],
+                "entityId": row["entity_id"], "label": row["label"], "date": row["entry_date"],
+                "field": row["field"], "before": before, "after": after, "appliedAt": row["applied_at"],
+            })
+        return result
 
     def _update(self, connection: sqlite3.Connection, kind: str, identifier: str, item: dict) -> None:
         row = self._find_row(connection, kind, identifier)

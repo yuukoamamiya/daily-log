@@ -28,11 +28,12 @@ if str(ROOT) not in sys.path:
 
 from daily_log import DailyLogError, normalize_plan  # noqa: E402
 from daily_log.database import DailyLogDatabase  # noqa: E402
+from daily_log.models import ACCOUNT_RE, normalize_tags  # noqa: E402
 from daily_log.data_location import relocate_profile, redirect_path, write_redirect  # noqa: E402
 from daily_log.config import LocalConfig  # noqa: E402
 from daily_log.paths import AppPaths  # noqa: E402
 from daily_log.runtime import bootstrap_runtime, migrate_legacy_runtime  # noqa: E402
-from daily_log.ai import parse_with_ai, test_ai_connection  # noqa: E402
+from daily_log.ai import parse_with_ai, suggest_organizer_with_ai, test_ai_connection  # noqa: E402
 from daily_log.worker import ProjectionWorker  # noqa: E402
 from daily_log.idle_worker import IdleWorker  # noqa: E402
 from daily_log.cloud_backup import (  # noqa: E402
@@ -76,6 +77,9 @@ LEGACY_MIGRATION_SOURCE: Path | None = None
 DATA_DIR_EXPLICIT = False
 ITEM_ROUTE = re.compile(r"^/api/items/(transaction|diary|todo|event)/([A-Za-z0-9-]+)$")
 TODO_ACTION_ROUTE = re.compile(r"^/api/todos/([A-Za-z0-9-]+)/(complete|restore)$")
+ORGANIZER_ID = re.compile(r"^[A-Za-z0-9-]+$")
+ORGANIZER_REVIEW_ROUTE = re.compile(r"^/api/organize/reviews/([A-Za-z0-9-]+)(?:/(retry|next))?$")
+ORGANIZER_BATCH_SIZE = 20
 LOGGER = logging.getLogger("daily_log.web")
 
 
@@ -202,6 +206,7 @@ def relocate_data_directory(payload: object) -> dict:
         include_database=True,
         settings_text=CONFIG.portable_text(),
         portable_root=PATHS.portable_root,
+        secrets_text=json.dumps(CONFIG.secrets(), ensure_ascii=False, indent=2),
     )
     program_root = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else ROOT
     details = relocate_profile(database(), PATHS.state_dir, Path(raw_target), program_root=program_root)
@@ -265,6 +270,16 @@ def _candidate_backup_settings(payload: object) -> dict:
                 section[target] = str(incoming[source] or "").strip()
         if "password" in incoming and str(incoming["password"] or "").strip():
             section["password"] = str(incoming["password"]).strip()
+    incoming_proxy = payload.get("proxy", {})
+    if incoming_proxy is not None and not isinstance(incoming_proxy, dict):
+        raise WebError("代理测试配置格式无效。")
+    incoming_proxy = incoming_proxy or {}
+    proxy = current["proxy"]
+    for field in ("mode", "url", "username"):
+        if field in incoming_proxy:
+            proxy[field] = str(incoming_proxy[field] or "").strip()
+    if "password" in incoming_proxy and str(incoming_proxy["password"] or "").strip():
+        proxy["password"] = str(incoming_proxy["password"]).strip()
     return current
 
 
@@ -274,9 +289,9 @@ def test_backup(payload: object) -> dict:
         PATHS.backups.mkdir(parents=True, exist_ok=True)
         return {"ok": True, "message": "本机备份目录可以正常使用。"}
     if settings["backend"] == "webdav":
-        return test_webdav_connection(settings["webdav"])
+        return test_webdav_connection({**settings["webdav"], "proxy": settings["proxy"]})
     if settings["backend"] == "s3":
-        return test_s3_connection(settings["s3"])
+        return test_s3_connection({**settings["s3"], "proxy": settings["proxy"]})
     raise WebError("暂不支持这个备份方式。")
 
 
@@ -347,14 +362,14 @@ def get_backup_status() -> dict:
     return status
 
 
-def backup_now(message: object = None) -> dict:
+def backup_now(message: object = None, *, timeout: float = 120) -> dict:
     global LAST_BACKUP_ERROR, LAST_BACKUP_AT, LAST_BACKUP_TARGET, BACKUP_PENDING
     if not BACKUP_LOCK.acquire(blocking=False):
         raise WebError("备份仍在处理中，请稍候。")
     try:
         worker().flush()
         settings = CONFIG.backup_settings()
-        secrets_text = json.dumps(CONFIG.secrets(), ensure_ascii=False, indent=2) if settings["include_secrets"] else None
+        secrets_text = json.dumps(CONFIG.secrets(), ensure_ascii=False, indent=2)
         archive = create_portable_archive(
             database(),
             destination=PATHS.backups,
@@ -366,7 +381,7 @@ def backup_now(message: object = None) -> dict:
         )
         if settings["encrypt_backup"]:
             archive = encrypt_archive(archive, settings["encryption_password"], remove_source=True)
-        target = upload_archive(archive, settings)
+        target = upload_archive(archive, settings, timeout=timeout)
         LAST_BACKUP_ERROR = None
         LAST_BACKUP_AT = datetime.now().astimezone().isoformat(timespec="seconds")
         LAST_BACKUP_TARGET = target
@@ -396,6 +411,7 @@ def restore_latest(password: object = "") -> dict:
             include_database=True,
             settings_text=CONFIG.portable_text(),
             portable_root=PATHS.portable_root,
+            secrets_text=json.dumps(CONFIG.secrets(), ensure_ascii=False, indent=2),
         )
         with tempfile.TemporaryDirectory(dir=PATHS.state_dir) as directory:
             working_archive = archive
@@ -530,6 +546,261 @@ def record_with_ai(text: object) -> dict:
     return result
 
 
+def organizer_snapshot(scope: str = "unorganized", month: str | None = None) -> dict:
+    if scope not in {"unorganized", "month", "all"}:
+        raise WebError("整理范围无效。")
+    if scope == "month":
+        if not month or not re.fullmatch(r"\d{4}-\d{2}", month):
+            raise WebError("整理月份格式无效。")
+        try:
+            datetime.strptime(month, "%Y-%m")
+        except ValueError as error:
+            raise WebError("整理月份无效。") from error
+    data = database()
+    all_transactions = data.list_transactions()
+    all_diary = data.list_diary()
+    all_todos = data.list_todos(include_completed=True)
+    in_scope = lambda item: scope != "month" or item["date"].startswith(month or "")
+    if scope == "unorganized":
+        transactions = [item for item in all_transactions if item["account"] == "expenses"]
+        diary = [item for item in all_diary if not item["tags"]]
+        todos = [item for item in all_todos if not item["tags"]]
+    else:
+        transactions = [item for item in all_transactions if in_scope(item)]
+        diary = [item for item in all_diary if in_scope(item)]
+        todos = [item for item in all_todos if in_scope(item)]
+    known_tags = sorted({tag for item in all_diary + all_todos for tag in item["tags"]})
+    return {
+        "scope": scope,
+        "month": month if scope == "month" else None,
+        "transactions": transactions,
+        "diary": diary,
+        "todos": todos,
+        "categories": data.list_categories(),
+        "knownTags": known_tags,
+        "history": data.list_organizer_changes(),
+    }
+
+
+def _selected_organizer_records(payload: dict, snapshot: dict) -> dict:
+    def ids(name: str, records: list[dict]) -> set[str]:
+        if name not in payload:
+            return {item["id"] for item in records}
+        values = payload.get(name)
+        if not isinstance(values, list):
+            raise WebError("整理选择格式无效。")
+        result = {str(value).strip() for value in values if str(value).strip()}
+        if any(not ORGANIZER_ID.fullmatch(value) for value in result):
+            raise WebError("整理记录编号无效。")
+        available = {item["id"] for item in records}
+        if not result.issubset(available):
+            raise WebError("整理记录已经变化，请刷新后重试。")
+        return result
+
+    transaction_ids = ids("transactionIds", snapshot["transactions"])
+    diary_ids = ids("diaryIds", snapshot["diary"])
+    todo_records = snapshot.get("todos", [])
+    todo_ids = ids("todoIds", todo_records)
+    return {
+        "transactions": [item for item in snapshot["transactions"] if item["id"] in transaction_ids],
+        "diary": [item for item in snapshot["diary"] if item["id"] in diary_ids],
+        "todos": [item for item in todo_records if item["id"] in todo_ids],
+    }
+
+
+def suggest_organizer(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise WebError("整理请求格式无效。")
+    scope = str(payload.get("scope") or "unorganized")
+    month = str(payload.get("month") or "") or None
+    snapshot = organizer_snapshot(scope, month)
+    records = _selected_organizer_records(payload, snapshot)
+    if not any(records.values()):
+        raise WebError("请先选择需要整理的记录。")
+    suggestions = suggest_organizer_with_ai(
+        records,
+        CONFIG.ai_credentials(),
+        context={"accounts": [f"expenses:{item}" for item in snapshot["categories"]], "tags": snapshot["knownTags"]},
+    )
+    return _normalize_organizer_suggestions(suggestions, records, snapshot)
+
+
+def _normalize_organizer_suggestions(suggestions: object, records: dict, snapshot: dict) -> dict:
+    if not isinstance(suggestions, dict):
+        raise WebError("AI 整理建议格式无效。")
+    valid_transactions = {item["id"]: item for item in records["transactions"]}
+    valid_diary = {item["id"]: item for item in records["diary"]}
+    valid_todos = {item["id"]: item for item in records["todos"]}
+    allowed_accounts = {f"expenses:{item}" for item in snapshot["categories"]}
+    normalized = {"transactions": [], "diary": [], "todos": []}
+    seen_ids = {"transactions": set(), "diary": set(), "todos": set()}
+    for item in suggestions.get("transactions", []):
+        if not isinstance(item, dict) or str(item.get("id") or "") not in valid_transactions:
+            raise WebError("AI 返回了无效的账目编号。")
+        account = str(item.get("account") or "").strip()
+        if not account:
+            continue
+        if not account.startswith("expenses:"):
+            account = f"expenses:{account}"
+        if not ACCOUNT_RE.fullmatch(account) or account not in allowed_accounts:
+            raise WebError("AI 返回了不存在的账目分类，请先建立分类后重试。")
+        if item["id"] in seen_ids["transactions"]:
+            raise WebError("AI 重复返回了账目建议。")
+        seen_ids["transactions"].add(item["id"])
+        normalized["transactions"].append({"id": str(item["id"]), "account": account})
+    for item in suggestions.get("diary", []):
+        if not isinstance(item, dict) or str(item.get("id") or "") not in valid_diary:
+            raise WebError("AI 返回了无效的日记编号。")
+        try:
+            tags = normalize_tags(item.get("tags"))
+        except DailyLogError as error:
+            raise WebError("AI 返回的日记标签格式无效。") from error
+        if item["id"] in seen_ids["diary"]:
+            raise WebError("AI 重复返回了日记建议。")
+        seen_ids["diary"].add(item["id"])
+        if tags:
+            normalized["diary"].append({"id": str(item["id"]), "tags": tags})
+    for item in suggestions.get("todos", []):
+        if not isinstance(item, dict) or str(item.get("id") or "") not in valid_todos:
+            raise WebError("AI 返回了无效的待办编号。")
+        try:
+            tags = normalize_tags(item.get("tags"))
+        except DailyLogError as error:
+            raise WebError("AI 返回的待办标签格式无效。") from error
+        if item["id"] in seen_ids["todos"]:
+            raise WebError("AI 重复返回了待办建议。")
+        seen_ids["todos"].add(item["id"])
+        if tags:
+            normalized["todos"].append({"id": str(item["id"]), "tags": tags})
+    return normalized
+
+
+def _organizer_batches(records: dict, size: int = ORGANIZER_BATCH_SIZE) -> list[dict]:
+    entries = [
+        ("transactions", item) for item in records["transactions"]
+    ] + [
+        ("diary", item) for item in records["diary"]
+    ] + [
+        ("todos", item) for item in records["todos"]
+    ]
+    batches = []
+    for start in range(0, len(entries), size):
+        batch = {"transactions": [], "diary": [], "todos": []}
+        for kind, item in entries[start:start + size]:
+            batch[kind].append(item)
+        batches.append(batch)
+    return batches
+
+
+def start_organizer_review(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise WebError("整理请求格式无效。")
+    scope = str(payload.get("scope") or "unorganized")
+    month = str(payload.get("month") or "") or None
+    snapshot = organizer_snapshot(scope, month)
+    records = _selected_organizer_records(payload, snapshot)
+    if not any(records.values()):
+        raise WebError("请先选择需要整理的记录。")
+    review_id = database().create_organizer_review(scope, month, _organizer_batches(records))
+    return database().organizer_review(review_id)
+
+
+def process_organizer_review(review_id: str) -> dict:
+    data = database()
+    batch = data.claim_organizer_batch(review_id)
+    if batch is None:
+        return data.organizer_review(review_id)
+    review = data.organizer_review(review_id)
+    try:
+        snapshot = organizer_snapshot(review["scope"], review["month"])
+        suggestions = suggest_organizer_with_ai(
+            batch["records"],
+            CONFIG.ai_credentials(),
+            context={"accounts": [f"expenses:{item}" for item in snapshot["categories"]], "tags": snapshot["knownTags"]},
+        )
+        normalized = _normalize_organizer_suggestions(suggestions, batch["records"], snapshot)
+    except Exception as error:  # noqa: BLE001
+        LOGGER.warning("AI 历史复核批次失败：%s", error)
+        message = str(error) or "AI 复核批次失败，请稍后重试。"
+        data.fail_organizer_batch(review_id, batch["number"], message)
+        return data.organizer_review(review_id)
+    data.complete_organizer_batch(review_id, batch["number"], normalized)
+    return data.organizer_review(review_id)
+
+
+def retry_organizer_review(review_id: str) -> dict:
+    database().retry_organizer_review(review_id)
+    return database().organizer_review(review_id)
+
+
+def apply_organizer(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise WebError("整理修改格式无效。")
+    transactions = payload.get("transactions", [])
+    diary = payload.get("diary", [])
+    todos = payload.get("todos", [])
+    if not isinstance(transactions, list) or not isinstance(diary, list) or not isinstance(todos, list):
+        raise WebError("整理修改格式无效。")
+    scope = str(payload.get("scope") or "unorganized")
+    month = str(payload.get("month") or "") or None
+    review_id = str(payload.get("reviewId") or "").strip() or None
+    if review_id:
+        if not ORGANIZER_ID.fullmatch(review_id):
+            raise WebError("复核批次编号无效。")
+        if database().organizer_review(review_id)["status"] != "completed":
+            raise WebError("AI 复核尚未完成，请等待所有批次完成或先重试失败批次。")
+    snapshot = organizer_snapshot(scope, month)
+    allowed = {
+        "transaction": {item["id"] for item in snapshot["transactions"]},
+        "diary": {item["id"] for item in snapshot["diary"]},
+        "todo": {item["id"] for item in snapshot.get("todos", [])},
+    }
+    for item in transactions:
+        if not isinstance(item, dict) or str(item.get("id") or "") not in allowed["transaction"]:
+            raise WebError("有账目已经变化，请刷新整理页后重试。")
+    for item in diary:
+        if not isinstance(item, dict) or str(item.get("id") or "") not in allowed["diary"]:
+            raise WebError("有日记已经变化，请刷新整理页后重试。")
+    for item in todos:
+        if not isinstance(item, dict) or str(item.get("id") or "") not in allowed["todo"]:
+            raise WebError("有待办已经变化，请刷新整理页后重试。")
+    if not transactions and not diary and not todos:
+        raise WebError("没有需要应用的修改。")
+    changed: dict = {}
+    organizer_kwargs = {"allow_existing": scope != "unorganized"}
+    if review_id:
+        organizer_kwargs["review_id"] = review_id
+    result = _local_change(lambda: changed.update(database().apply_organizer(
+        transactions, diary, todos, **organizer_kwargs
+    )))
+    result.update(changed)
+    result["message"] = f"已整理 {changed.get('transactions', 0)} 笔账目、{changed.get('diary', 0)} 篇日记和 {changed.get('todos', 0)} 项待办"
+    return result
+
+
+def bulk_edit(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise WebError("批量编辑格式无效。")
+    transactions = payload.get("transactions", [])
+    diary = payload.get("diary", [])
+    todos = payload.get("todos", [])
+    if not all(isinstance(items, list) for items in (transactions, diary, todos)):
+        raise WebError("批量编辑格式无效。")
+    if not transactions and not diary and not todos:
+        raise WebError("请先选择需要编辑的记录。")
+    for items, label in ((transactions, "账目"), (diary, "日记"), (todos, "待办")):
+        for item in items:
+            if not isinstance(item, dict) or not ORGANIZER_ID.fullmatch(str(item.get("id") or "")):
+                raise WebError(f"批量编辑的{label}编号无效。")
+    changed: dict = {}
+    result = _local_change(lambda: changed.update(database().apply_organizer(
+        transactions, diary, todos, allow_existing=True
+    )))
+    result.update(changed)
+    result["message"] = f"已批量修改 {changed.get('transactions', 0)} 笔账目、{changed.get('diary', 0)} 篇日记和 {changed.get('todos', 0)} 项待办"
+    return result
+
+
 class DailyLogHandler(BaseHTTPRequestHandler):
     server_version = f"DailyLogLocal/{__version__}"
 
@@ -566,6 +837,29 @@ class DailyLogHandler(BaseHTTPRequestHandler):
             month = parse_qs(parsed.query).get("month", [None])[0]
             try:
                 self.send_json(build_dashboard(month, database(), subscribed_events()))
+            except Exception as error:  # noqa: BLE001
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if parsed.path == "/api/organize":
+            try:
+                query = parse_qs(parsed.query)
+                scope = query.get("scope", ["unorganized"])[0]
+                month = query.get("month", [None])[0]
+                self.send_json(organizer_snapshot(scope, month))
+            except Exception as error:  # noqa: BLE001
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        review_match = ORGANIZER_REVIEW_ROUTE.fullmatch(parsed.path)
+        if review_match and review_match.group(2) is None:
+            try:
+                self.send_json(database().organizer_review(review_match.group(1)))
+            except Exception as error:  # noqa: BLE001
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if parsed.path == "/api/organize/history":
+            try:
+                limit = parse_qs(parsed.query).get("limit", [30])[0]
+                self.send_json({"changes": database().list_organizer_changes(int(limit))})
             except Exception as error:  # noqa: BLE001
                 self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -610,6 +904,25 @@ class DailyLogHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/ai/record":
                 self.send_json(record_with_ai(payload.get("text", "")))
+                return
+            if self.path == "/api/organize/suggest":
+                self.send_json(suggest_organizer(payload))
+                return
+            if self.path == "/api/organize/reviews":
+                self.send_json(start_organizer_review(payload), HTTPStatus.CREATED)
+                return
+            review_match = ORGANIZER_REVIEW_ROUTE.fullmatch(urlparse(self.path).path)
+            if review_match and review_match.group(2) == "next":
+                self.send_json(process_organizer_review(review_match.group(1)))
+                return
+            if review_match and review_match.group(2) == "retry":
+                self.send_json(retry_organizer_review(review_match.group(1)))
+                return
+            if self.path == "/api/organize/apply":
+                self.send_json(apply_organizer(payload))
+                return
+            if self.path == "/api/bulk-edit":
+                self.send_json(bulk_edit(payload))
                 return
             if self.path == "/api/categories/rename":
                 self.send_json({"error": "旧分类迁移接口已停用。"}, HTTPStatus.GONE)

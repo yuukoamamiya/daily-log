@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f4f5f2" />
     <title>Daily Log · 生活工作台</title>
-    <link rel="stylesheet" href="/styles.css?v=20260830-5" />
+    <link rel="stylesheet" href="/styles.css?v=20260902-4" />
   </head>
   <body>
     <svg class="icon-sprite" aria-hidden="true">
@@ -18,6 +18,7 @@
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
       <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
       <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 2 1.7 5.1L19 9l-5.3 1.9L12 16l-1.7-5.1L5 9l5.3-1.9L12 2Z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15Z"/></symbol>
+      <symbol id="i-organize" viewBox="0 0 24 24"><path d="M5 4v16M5 7h8a3 3 0 0 1 0 6H5M5 17h10a3 3 0 0 0 0-6h-2"/><path d="m17 17 2 2 3-4"/></symbol>
       <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
       <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
       <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
@@ -40,6 +41,7 @@
           <button class="nav-item" data-route="expenses"><svg><use href="#i-wallet"/></svg><span>账目</span></button>
           <button class="nav-item" data-route="diary"><svg><use href="#i-book"/></svg><span>日记</span></button>
           <button class="nav-item" data-route="todos"><svg><use href="#i-check"/></svg><span>待办</span></button>
+          <button class="nav-item" data-route="organize"><svg><use href="#i-organize"/></svg><span>整理</span></button>
           <button class="nav-item" data-route="settings"><svg><use href="#i-settings"/></svg><span>设置</span></button>
         </nav>
         <div class="sidebar-foot">
@@ -58,6 +60,7 @@
             <p id="page-eyebrow">生活工作台</p>
             <h1 id="page-title">概览</h1>
           </div>
+          <label class="global-search" for="global-search"><svg><use href="#i-search"/></svg><input id="global-search" type="search" placeholder="搜索记录" autocomplete="off" /></label>
           <div class="top-actions">
             <button class="backup-button" id="backup-button" type="button"><svg><use href="#i-cloud"/></svg><span>立即备份</span></button>
             <button class="primary-button" data-open-composer="transaction"><svg><use href="#i-plus"/></svg><span>快速记录</span><kbd>N</kbd></button>
@@ -96,8 +99,8 @@
           <div class="form-intro coral"><svg><use href="#i-wallet"/></svg><div><strong>记录一笔支出</strong><span>金额和分类会保存到本地账本；也可以直接输入新分类</span></div></div>
           <label>日期<input name="date" type="date" required /></label>
           <label>消费项目<input name="summary" type="text" maxlength="120" placeholder="例如：午饭" required /></label>
-          <div class="field-row"><label>金额<input name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" required /></label><label>一级分类（可选）<select name="categoryParent"><option value="">未分类</option><option value="__new_parent__">＋ 新增一级分类…</option></select></label></div>
-          <label>二级分类（可选）<select name="categoryChild" disabled><option value="">先选择一级分类</option></select></label>
+          <div class="field-row"><label><span class="field-label">金额</span><input name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" required /></label><label class="category-field"><span class="field-label">一级分类 <em>可选</em></span><span class="select-shell"><select name="categoryParent" aria-label="一级分类" aria-describedby="category-parent-note"><option value="">未分类</option><option value="__new_parent__">＋ 新增一级分类…</option></select></span><small class="category-field-note" id="category-parent-note">留空表示未分类</small></label></div>
+          <label class="category-field" id="category-child-field" hidden><span class="field-label">二级分类 <em>可选</em></span><span class="select-shell"><select name="categoryChild" aria-label="二级分类" aria-describedby="category-child-note" disabled><option value="">先选择一级分类</option></select></span><small class="category-field-note" id="category-child-note">先选择一级分类后可选二级分类</small></label>
           <div class="category-quick-add" id="category-quick-add" hidden><div class="category-quick-add-head"><strong id="category-quick-add-title">新增分类</strong><button type="button" class="text-button" data-category-quick-cancel>取消</button></div><label>分类名称<input id="category-quick-add-name" type="text" maxlength="40" placeholder="例如：医疗" /></label><button type="button" class="submit-button dark" data-category-quick-save>保存分类</button></div>
           <label>备注<textarea name="note" rows="3" maxlength="500" placeholder="可选，记录消费细节"></textarea></label>
           <button class="submit-button coral" type="submit">写入账本<svg><use href="#i-arrow"/></svg></button>
@@ -154,6 +157,6 @@
       </section>
     </div>
     <div class="toast-region" id="toast-region" aria-live="assertive"></div>
-    <script type="module" src="/app.js?v=20260831-1"></script>
+    <script type="module" src="/app.js?v=20260902-4"></script>
   </body>
 </html>

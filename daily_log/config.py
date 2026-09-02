@@ -20,6 +20,7 @@ DEFAULT_SUBSCRIPTIONS = [{
     "url": CHINA_HOLIDAY_URL,
     "enabled": False,
 }]
+THEMES = {"light", "dark", "system"}
 
 DEFAULTS = {
     "ai": {
@@ -34,7 +35,6 @@ DEFAULTS = {
         "idle_seconds": "60",
         "backend": "local",
         "include_data": "true",
-        "include_secrets": "false",
         "encrypt_backup": "false",
         "encryption_password": "",
     },
@@ -53,9 +53,16 @@ DEFAULTS = {
         "secret_key": "",
         "allow_private": "false",
     },
+    "backup_proxy": {
+        "mode": "system",
+        "url": "",
+        "username": "",
+        "password": "",
+    },
     "application": {
         "start_minimized": "false",
         "onboarding_completed": "false",
+        "theme": "system",
     },
     "calendar_subscriptions": {
         "items_json": json.dumps(DEFAULT_SUBSCRIPTIONS, ensure_ascii=False),
@@ -85,6 +92,9 @@ class LocalConfig:
 
     def public(self) -> dict:
         parser = self.load()
+        theme = parser.get("application", "theme", fallback="system").strip().lower()
+        if theme not in THEMES:
+            theme = "system"
         return {
             "ai": {
                 "enabled": parser.getboolean("ai", "enabled", fallback=False),
@@ -98,7 +108,6 @@ class LocalConfig:
                 "idleSeconds": parser.getint("backup", "idle_seconds", fallback=60),
                 "backend": parser.get("backup", "backend", fallback="local"),
                 "includeData": parser.getboolean("backup", "include_data", fallback=True),
-                "includeSecrets": parser.getboolean("backup", "include_secrets", fallback=False),
                 "encryptBackup": parser.getboolean("backup", "encrypt_backup", fallback=False),
                 "encryptionPasswordConfigured": bool(
                     parser.get("backup", "encryption_password", fallback="")
@@ -118,10 +127,17 @@ class LocalConfig:
                     "secretKeyConfigured": bool(parser.get("s3", "secret_key", fallback="")),
                     "allowPrivate": parser.getboolean("s3", "allow_private", fallback=False),
                 },
+                "proxy": {
+                    "mode": parser.get("backup_proxy", "mode", fallback="system"),
+                    "url": parser.get("backup_proxy", "url", fallback=""),
+                    "username": parser.get("backup_proxy", "username", fallback=""),
+                    "passwordConfigured": bool(parser.get("backup_proxy", "password", fallback="")),
+                },
             },
             "application": {
                 "startMinimized": parser.getboolean("application", "start_minimized", fallback=False),
                 "onboardingCompleted": parser.getboolean("application", "onboarding_completed", fallback=False),
+                "theme": theme,
             },
             "calendarSubscriptions": self._subscription_items(parser),
             "configPath": str(self.path),
@@ -142,11 +158,11 @@ class LocalConfig:
         return {
             "backend": parser.get("backup", "backend", fallback="local"),
             "include_data": parser.getboolean("backup", "include_data", fallback=True),
-            "include_secrets": parser.getboolean("backup", "include_secrets", fallback=False),
             "encrypt_backup": parser.getboolean("backup", "encrypt_backup", fallback=False),
             "encryption_password": parser.get("backup", "encryption_password", fallback=""),
             "webdav": dict(parser["webdav"]),
             "s3": dict(parser["s3"]),
+            "proxy": dict(parser["backup_proxy"]),
         }
 
     @staticmethod
@@ -243,6 +259,10 @@ class LocalConfig:
                 "access_key": parser.get("s3", "access_key", fallback=""),
                 "secret_key": parser.get("s3", "secret_key", fallback=""),
             },
+            "backup_proxy": {
+                "username": parser.get("backup_proxy", "username", fallback=""),
+                "password": parser.get("backup_proxy", "password", fallback=""),
+            },
         }
 
     def portable_text(self) -> str:
@@ -252,11 +272,15 @@ class LocalConfig:
         parser["ai"] = {key: value for key, value in source["ai"].items() if key != "api_key"}
         parser["backup"] = {
             key: value for key, value in source["backup"].items()
-            if key not in {"encryption_password", "include_settings"}
+            if key not in {"encryption_password", "include_secrets", "include_settings"}
         }
         parser["webdav"] = {key: value for key, value in source["webdav"].items() if key != "password"}
         parser["s3"] = {
             key: value for key, value in source["s3"].items() if key not in {"access_key", "secret_key"}
+        }
+        parser["backup_proxy"] = {
+            key: value for key, value in source["backup_proxy"].items()
+            if key not in {"username", "password"}
         }
         parser["application"] = dict(source["application"])
         parser["calendar_subscriptions"] = {
@@ -281,13 +305,14 @@ class LocalConfig:
                         if not parser.has_section(section):
                             parser.add_section(section)
                         for key, value in incoming[section].items():
-                            if key not in {"api_key", "password", "access_key", "secret_key", "encryption_password"}:
+                            if key not in {"api_key", "password", "access_key", "secret_key", "encryption_password", "include_secrets"}:
                                 parser[section][key] = value
             if secrets:
                 for section, keys in (
                     ("ai", ("api_key",)),
                     ("webdav", ("password",)),
                     ("s3", ("access_key", "secret_key")),
+                    ("backup_proxy", ("username", "password")),
                 ):
                     values = secrets.get(section, {})
                     if isinstance(values, dict):
@@ -353,12 +378,8 @@ class LocalConfig:
             parser["backup"]["backend"] = backend
             parser["backup"].pop("include_settings", None)
             include_data = _bool(backup.get("includeData", parser["backup"]["include_data"]))
-            include_secrets = _bool(backup.get("includeSecrets", parser["backup"]["include_secrets"]))
             encrypt_backup = _bool(backup.get("encryptBackup", parser["backup"].get("encrypt_backup", "false")))
-            if not include_data and not include_secrets:
-                raise ValidationError("至少选择一种要备份的内容。")
             parser["backup"]["include_data"] = str(include_data).lower()
-            parser["backup"]["include_secrets"] = str(include_secrets).lower()
             parser["backup"]["encrypt_backup"] = str(encrypt_backup).lower()
             supplied_password = str(backup.get("encryptionPassword", ""))
             if supplied_password:
@@ -372,6 +393,49 @@ class LocalConfig:
             s3 = backup.get("s3", {})
             if not isinstance(webdav, dict) or not isinstance(s3, dict):
                 raise ValidationError("备份服务配置格式无效。")
+            proxy = backup.get("proxy", {})
+            if not isinstance(proxy, dict):
+                raise ValidationError("代理配置格式无效。")
+            proxy_mode = str(proxy.get("mode", parser["backup_proxy"]["mode"])).strip().lower()
+            if proxy_mode not in {"system", "none", "custom"}:
+                raise ValidationError("代理方式无效。")
+            proxy_url = str(proxy.get("url", parser["backup_proxy"]["url"])).strip().rstrip("/")
+            if proxy_mode == "custom":
+                try:
+                    parsed_proxy = urlparse(proxy_url)
+                except ValueError as error:
+                    raise ValidationError("代理地址无效。") from error
+                try:
+                    proxy_port = parsed_proxy.port
+                except ValueError as error:
+                    raise ValidationError("代理地址无效。") from error
+                if (
+                    parsed_proxy.scheme not in {"http", "https"}
+                    or not parsed_proxy.hostname
+                    or parsed_proxy.username
+                    or parsed_proxy.password
+                    or parsed_proxy.path not in {"", "/"}
+                    or parsed_proxy.query
+                    or parsed_proxy.fragment
+                    or (proxy_port is not None and not 1 <= proxy_port <= 65535)
+                ):
+                    raise ValidationError("代理地址必须是有效的 HTTP 或 HTTPS 代理地址，且不能内嵌用户名密码。")
+                if not proxy_url:
+                    raise ValidationError("使用自定义代理前请填写代理地址。")
+            elif proxy_url:
+                try:
+                    parsed_proxy = urlparse(proxy_url)
+                except ValueError as error:
+                    raise ValidationError("代理地址无效。") from error
+                if parsed_proxy.scheme not in {"http", "https"} or not parsed_proxy.hostname:
+                    raise ValidationError("代理地址无效。")
+            parser["backup_proxy"]["mode"] = proxy_mode
+            parser["backup_proxy"]["url"] = proxy_url
+            parser["backup_proxy"]["username"] = str(
+                proxy.get("username", parser["backup_proxy"]["username"])
+            ).strip()
+            if str(proxy.get("password", "")).strip():
+                parser["backup_proxy"]["password"] = str(proxy["password"]).strip()
             webdav_url = str(webdav.get("url", parser["webdav"]["url"])).strip()
             if webdav_url:
                 webdav_parsed = urlparse(webdav_url)
@@ -400,6 +464,10 @@ class LocalConfig:
             parser["application"]["onboarding_completed"] = str(
                 _bool(application.get("onboardingCompleted", parser["application"].get("onboarding_completed", "false")))
             ).lower()
+            theme = str(application.get("theme", parser["application"].get("theme", "system"))).strip().lower()
+            if theme not in THEMES:
+                raise ValidationError("主题必须是浅色、深色或跟随系统。")
+            parser["application"]["theme"] = theme
             self._save_subscription_items(parser, self._subscription_items(parser))
             self._write(parser)
         return self.public()

@@ -5,6 +5,7 @@ import base64
 import hashlib
 import hmac
 import ipaddress
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -54,7 +55,85 @@ def _http_error(error: Exception) -> BackupError:
     return BackupError(f"远程备份连接失败：{type(error).__name__}")
 
 
-def upload_webdav(archive: Path, settings: dict) -> str:
+def _validated_proxy_url(value: object) -> str:
+    try:
+        parsed = urllib.parse.urlparse(str(value or "").strip())
+    except ValueError as error:
+        raise ValidationError("代理地址无效。") from error
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValidationError("代理地址无效。") from error
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ValidationError("代理地址必须是有效的 HTTP 或 HTTPS 代理地址，且不能内嵌用户名密码。")
+    return str(value).strip().rstrip("/")
+
+
+def _open_once(request: urllib.request.Request, timeout: float, settings: dict):
+    proxy = settings.get("proxy") or {}
+    if not isinstance(proxy, dict):
+        raise ValidationError("代理配置格式无效。")
+    mode = str(proxy.get("mode", "system") or "system").strip().lower()
+    if mode == "system":
+        return urllib.request.urlopen(request, timeout=timeout)
+    if mode not in {"none", "custom"}:
+        raise ValidationError("代理方式无效。")
+    proxy_url = ""
+    if mode == "custom":
+        proxy_url = _validated_proxy_url(proxy.get("url"))
+        if not proxy_url:
+            raise ValidationError("使用自定义代理前请填写代理地址。")
+    handlers = [urllib.request.ProxyHandler({} if mode == "none" else {
+        "http": proxy_url,
+        "https": proxy_url,
+    })]
+    if mode == "custom" and (proxy.get("username") or proxy.get("password")):
+        manager = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+        manager.add_password(
+            None,
+            proxy_url,
+            str(proxy.get("username") or ""),
+            str(proxy.get("password") or ""),
+        )
+        handlers.append(urllib.request.ProxyBasicAuthHandler(manager))
+    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+
+
+def _open_url(request: urllib.request.Request, timeout: float, settings: dict):
+    for attempt in range(2):
+        try:
+            return _open_once(request, timeout, settings)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt == 1:
+                raise
+            time.sleep(0.2)
+
+
+def _read_url(request: urllib.request.Request, timeout: float, settings: dict) -> bytes:
+    for attempt in range(2):
+        try:
+            with _open_once(request, timeout, settings) as response:
+                return response.read()
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt == 1:
+                raise
+            time.sleep(0.2)
+
+
+def upload_webdav(archive: Path, settings: dict, *, timeout: float = 120) -> str:
     base_url = str(settings.get("url") or "").strip().rstrip("/")
     _validated_url(base_url, "WebDAV", allow_path=True, allow_private=_as_bool(settings.get("allow_private")))
     target = f"{base_url}/{urllib.parse.quote(archive.name)}"
@@ -66,7 +145,7 @@ def upload_webdav(archive: Path, settings: dict) -> str:
         headers["Authorization"] = f"Basic {token}"
     request = urllib.request.Request(target, data=archive.read_bytes(), headers=headers, method="PUT")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with _open_url(request, timeout, settings) as response:
             if response.status not in {200, 201, 204}:
                 raise BackupError(f"WebDAV 返回了未预期状态：{response.status}")
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
@@ -117,14 +196,14 @@ def _s3_request(method: str, settings: dict, key: str = "", *, query: dict[str, 
     })
 
 
-def upload_s3(archive: Path, settings: dict) -> str:
+def upload_s3(archive: Path, settings: dict, *, timeout: float = 120) -> str:
     prefix = str(settings.get("prefix") or "").strip("/")
     key = "/".join(part for part in (prefix, archive.name) if part)
     payload = archive.read_bytes()
     request = _s3_request("PUT", settings, key, payload=payload)
     request.add_header("Content-Type", "application/octet-stream" if archive.name.endswith(".dlenc") else "application/zip")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with _open_url(request, timeout, settings) as response:
             if response.status not in {200, 201, 204}:
                 raise BackupError(f"S3 返回了未预期状态：{response.status}")
     except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
@@ -132,14 +211,14 @@ def upload_s3(archive: Path, settings: dict) -> str:
     return request.full_url
 
 
-def upload_archive(archive: Path, settings: dict) -> str:
+def upload_archive(archive: Path, settings: dict, *, timeout: float = 120) -> str:
     backend = settings.get("backend", "local")
     if backend == "local":
         return str(archive)
     if backend == "webdav":
-        return upload_webdav(archive, settings["webdav"])
+        return upload_webdav(archive, {**settings["webdav"], "proxy": settings.get("proxy", {})}, timeout=timeout)
     if backend == "s3":
-        return upload_s3(archive, settings["s3"])
+        return upload_s3(archive, {**settings["s3"], "proxy": settings.get("proxy", {})}, timeout=timeout)
     raise ValidationError("未知的备份方式。")
 
 
@@ -150,8 +229,8 @@ def test_webdav_connection(settings: dict) -> dict:
     headers = {**_webdav_headers(settings), "Depth": "0", "Content-Type": "application/xml"}
     body = b'<?xml version="1.0"?><propfind xmlns="DAV:"><prop><resourcetype/></prop></propfind>'
     try:
-        with urllib.request.urlopen(
-            urllib.request.Request(base_url + "/", data=body, headers=headers, method="PROPFIND"), timeout=30
+        with _open_url(
+            urllib.request.Request(base_url + "/", data=body, headers=headers, method="PROPFIND"), 30, settings
         ) as response:
             status = getattr(response, "status", 200)
             if status not in {200, 204, 207}:
@@ -170,7 +249,7 @@ def test_s3_connection(settings: dict) -> dict:
     """List at most one object to verify S3 credentials and bucket access."""
     request = _s3_request("GET", settings, query={"list-type": "2", "max-keys": "1"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _open_url(request, 30, settings) as response:
             status = getattr(response, "status", 200)
             if not 200 <= status < 300:
                 raise BackupError(f"S3 返回了未预期状态（HTTP {status}）。")
@@ -202,8 +281,9 @@ def download_latest_webdav(settings: dict, destination: Path) -> Path:
     headers = {**_webdav_headers(settings), "Depth": "1", "Content-Type": "application/xml"}
     body = b'<?xml version="1.0"?><propfind xmlns="DAV:"><prop><getlastmodified/></prop></propfind>'
     try:
-        with urllib.request.urlopen(urllib.request.Request(base_url + "/", data=body, headers=headers, method="PROPFIND"), timeout=120) as response:
-            listing = response.read()
+        listing = _read_url(
+            urllib.request.Request(base_url + "/", data=body, headers=headers, method="PROPFIND"), 120, settings
+        )
         names = []
         for node in ET.fromstring(listing).iter():
             if node.tag.endswith("href") and node.text:
@@ -214,8 +294,9 @@ def download_latest_webdav(settings: dict, destination: Path) -> Path:
             raise BackupError("WebDAV 中还没有可恢复的备份。")
         name = max(names)
         target_url = f"{base_url}/{urllib.parse.quote(name)}"
-        with urllib.request.urlopen(urllib.request.Request(target_url, headers=_webdav_headers(settings)), timeout=120) as response:
-            payload = response.read()
+        payload = _read_url(
+            urllib.request.Request(target_url, headers=_webdav_headers(settings)), 120, settings
+        )
     except BackupError:
         raise
     except (ET.ParseError, urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
@@ -230,15 +311,13 @@ def download_latest_s3(settings: dict, destination: Path) -> Path:
     prefix = str(settings.get("prefix") or "").strip("/")
     query = {"list-type": "2", "prefix": (prefix + "/") if prefix else "daily-log-"}
     try:
-        with urllib.request.urlopen(_s3_request("GET", settings, query=query), timeout=120) as response:
-            listing = response.read()
+        listing = _read_url(_s3_request("GET", settings, query=query), 120, settings)
         keys = [node.text for node in ET.fromstring(listing).iter() if node.tag.endswith("Key") and node.text]
         keys = [key for key in keys if key.rsplit("/", 1)[-1].startswith("daily-log-") and (key.endswith(".zip") or key.endswith(".zip.dlenc"))]
         if not keys:
             raise BackupError("S3 中还没有可恢复的备份。")
         key = max(keys)
-        with urllib.request.urlopen(_s3_request("GET", settings, key), timeout=120) as response:
-            payload = response.read()
+        payload = _read_url(_s3_request("GET", settings, key), 120, settings)
     except BackupError:
         raise
     except (ET.ParseError, urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
@@ -261,7 +340,7 @@ def download_latest_archive(settings: dict, destination: Path) -> Path:
         return candidates[-1]
     downloads = Path(destination).parent / "restore-downloads"
     if backend == "webdav":
-        return download_latest_webdav(settings["webdav"], downloads)
+        return download_latest_webdav({**settings["webdav"], "proxy": settings.get("proxy", {})}, downloads)
     if backend == "s3":
-        return download_latest_s3(settings["s3"], downloads)
+        return download_latest_s3({**settings["s3"], "proxy": settings.get("proxy", {})}, downloads)
     raise ValidationError("未知的备份方式。")

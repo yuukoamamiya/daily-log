@@ -1,5 +1,7 @@
 import logging
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -22,6 +24,29 @@ class P0ReliabilityTest(unittest.TestCase):
                 first.release()
             second.acquire()
             second.release()
+
+    def test_second_launch_can_request_existing_desktop_instance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / ".instance.lock"
+            first = SingleInstance(lock_path)
+            second = SingleInstance(lock_path)
+            called = threading.Event()
+            first.acquire()
+            first.mark_reopen_available()
+            first.start_reopen_listener(called.set, interval=0.01)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "已经有 Daily Log"):
+                    second.acquire()
+                self.assertTrue(second.reopen_available)
+                second.request_reopen()
+                self.assertTrue(called.wait(timeout=1))
+                deadline = time.monotonic() + 1
+                while first._reopen_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertFalse(first._reopen_path.exists())
+            finally:
+                first.stop_reopen_listener()
+                first.release()
 
     def test_log_redaction_excludes_secrets(self):
         with tempfile.TemporaryDirectory() as directory:

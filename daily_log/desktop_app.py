@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 from .paths import AppPaths
@@ -45,7 +46,21 @@ def _tray_image(Image, ImageDraw):
 
 
 class DesktopApplication:
-    def __init__(self, *, webview, pystray, window, server, instance):
+    CLOSE_BACKUP_TIMEOUT = 15
+
+    def __init__(
+        self,
+        *,
+        webview,
+        pystray,
+        window,
+        server,
+        instance,
+        backup=None,
+        backup_status=None,
+        flush=None,
+        idle_backup=None,
+    ):
         self.webview = webview
         self.pystray = pystray
         self.window = window
@@ -53,6 +68,15 @@ class DesktopApplication:
         self.instance = instance
         self.tray = None
         self.allow_close = False
+        self._backup_callback = backup
+        self._backup_status_callback = backup_status
+        self._flush_callback = flush
+        self._idle_backup = idle_backup
+        self._close_lock = threading.RLock()
+        self._close_cancelled = threading.Event()
+        self._closing = False
+        self._close_generation = 0
+        self._close_thread = None
 
     def start_tray(self, image) -> None:
         menu = self.pystray.Menu(
@@ -66,11 +90,157 @@ class DesktopApplication:
     def on_closing(self, *_args) -> bool:
         if self.allow_close:
             return True
-        self.window.hide()
+        self._request_exit()
         return False
 
+    def _request_exit(self) -> None:
+        with self._close_lock:
+            if self.allow_close or self._closing:
+                return
+        try:
+            status = self._runtime_backup_status()
+        except Exception as error:  # noqa: BLE001
+            LOGGER.warning("读取退出前备份状态失败，将尝试安全收尾：%s", error)
+            status = {"pending": True, "busy": False}
+        if status.get("pending") or status.get("busy"):
+            self._begin_close()
+        else:
+            self._exit_now()
+
+    def _begin_close(self) -> None:
+        with self._close_lock:
+            if self.allow_close or self._closing:
+                return
+            self._closing = True
+            self._close_generation += 1
+            generation = self._close_generation
+            self._close_cancelled.clear()
+        self._set_tray_title("Daily Log：正在保存并备份，点击打开可取消退出")
+        self.window.hide()
+        self._close_thread = threading.Thread(
+            target=self._finish_close,
+            args=(generation,),
+            name="daily-log-close",
+            daemon=True,
+        )
+        self._close_thread.start()
+
     def _show_window(self, *_args) -> None:
+        with self._close_lock:
+            closing = self._closing and not self.allow_close
+            if closing:
+                self._close_cancelled.set()
         self.window.show()
+        if not closing:
+            self._set_tray_title("Daily Log")
+
+    def _minimize_to_tray(self, *_args) -> None:
+        if self._closing:
+            return
+        self.window.hide()
+        self._notify_background_backup()
+
+    def _notify_background_backup(self) -> None:
+        if self._idle_backup is not None:
+            try:
+                self._idle_backup.notify()
+            except Exception as error:  # noqa: BLE001
+                LOGGER.warning("无法触发闲时自动备份：%s", error)
+            return
+        try:
+            import web_server
+
+            if web_server.AUTO_BACKUP is not None:
+                web_server.AUTO_BACKUP.notify()
+        except Exception as error:  # noqa: BLE001
+            LOGGER.warning("无法触发闲时自动备份：%s", error)
+
+    def _set_tray_title(self, title: str) -> None:
+        if self.tray is not None:
+            self.tray.title = title
+
+    def _runtime_backup_status(self) -> dict:
+        if self._backup_status_callback is not None:
+            return self._backup_status_callback()
+        import web_server
+
+        return web_server.get_backup_status()
+
+    def _flush_local(self) -> None:
+        if self._flush_callback is not None:
+            self._flush_callback()
+            return
+        import web_server
+
+        web_server.worker().flush()
+
+    def _backup_before_close(self, *, timeout: float) -> None:
+        if self._backup_callback is not None:
+            self._backup_callback("关闭前自动备份", timeout=timeout)
+            return
+        import web_server
+
+        web_server.backup_now("关闭前自动备份", timeout=timeout)
+
+    def _wait_for_backup_idle(self, deadline: float) -> dict:
+        status = self._runtime_backup_status()
+        while status.get("busy") and time.monotonic() < deadline:
+            time.sleep(0.1)
+            status = self._runtime_backup_status()
+        return status
+
+    def _close_was_cancelled(self, generation: int) -> bool:
+        with self._close_lock:
+            return (
+                self._close_generation != generation
+                or not self._closing
+                or self._close_cancelled.is_set()
+            )
+
+    def _finish_close(self, generation: int) -> None:
+        try:
+            if self._close_was_cancelled(generation):
+                return
+            self._flush_local()
+            if self._close_was_cancelled(generation):
+                return
+            deadline = time.monotonic() + self.CLOSE_BACKUP_TIMEOUT
+            status = self._wait_for_backup_idle(deadline)
+            remaining = deadline - time.monotonic()
+            if (
+                not self._close_was_cancelled(generation)
+                and status.get("pending")
+                and not status.get("busy")
+                and remaining > 0
+            ):
+                self._set_tray_title("Daily Log：正在备份，点击打开可取消退出")
+                self._backup_before_close(timeout=remaining)
+        except Exception as error:  # noqa: BLE001
+            LOGGER.warning("关闭前备份失败，将保留待备份状态：%s", error)
+        finally:
+            stale = False
+            with self._close_lock:
+                if self._close_generation != generation or not self._closing:
+                    stale = True
+                    cancelled = True
+                else:
+                    cancelled = self._close_cancelled.is_set()
+                    self._closing = False
+                    if not cancelled:
+                        self.allow_close = True
+            if not stale:
+                self._set_tray_title("Daily Log")
+                if not cancelled:
+                    self.window.destroy()
+
+    def _exit_now(self) -> None:
+        with self._close_lock:
+            self.allow_close = True
+            self._closing = False
+            self._close_cancelled.set()
+        if self.tray is not None:
+            self.tray.stop()
+        self.window.destroy()
 
     def _backup(self, *_args) -> None:
         def run() -> None:
@@ -84,10 +254,7 @@ class DesktopApplication:
         threading.Thread(target=run, name="daily-log-tray-backup", daemon=True).start()
 
     def _exit(self, *_args) -> None:
-        self.allow_close = True
-        if self.tray is not None:
-            self.tray.stop()
-        self.window.destroy()
+        self._request_exit()
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -123,6 +290,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         instance.acquire()
     except InstanceAlreadyRunning as error:
+        if instance.reopen_available:
+            try:
+                instance.request_reopen()
+            except OSError:
+                print(str(error), file=sys.stderr)
+                return 1
+            print("Daily Log 已在运行，正在打开已有窗口。")
+            return 0
         print(str(error), file=sys.stderr)
         return 1
 
@@ -143,12 +318,19 @@ def main(argv: list[str] | None = None) -> int:
             min_size=(860, 620),
         )
         application = DesktopApplication(
-            webview=webview, pystray=pystray, window=window, server=server, instance=instance
+            webview=webview,
+            pystray=pystray,
+            window=window,
+            server=server,
+            instance=instance,
+            idle_backup=web_server.AUTO_BACKUP,
         )
+        instance.mark_reopen_available()
+        instance.start_reopen_listener(application._show_window)
         window.events.closing += application.on_closing
         def hide_if_minimized(*_args) -> None:
             if web_server.CONFIG.public()["application"].get("startMinimized"):
-                window.hide()
+                application._minimize_to_tray()
 
         window.events.loaded += hide_if_minimized
         application.start_tray(_tray_image(Image, ImageDraw))
@@ -159,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
             application.allow_close = True
             if application.tray is not None:
                 application.tray.stop()
+        instance.stop_reopen_listener()
         if server is not None and server_thread is not None and server_thread.is_alive():
             server.shutdown()
         if server is not None:
