@@ -77,6 +77,7 @@ LEGACY_MIGRATION_SOURCE: Path | None = None
 DATA_DIR_EXPLICIT = False
 ITEM_ROUTE = re.compile(r"^/api/items/(transaction|diary|todo|event)/([A-Za-z0-9-]+)$")
 TODO_ACTION_ROUTE = re.compile(r"^/api/todos/([A-Za-z0-9-]+)/(complete|restore)$")
+INBOX_ROUTE = re.compile(r"^/api/inbox/([A-Za-z0-9-]+)(?:/(process|apply))?$")
 ORGANIZER_ID = re.compile(r"^[A-Za-z0-9-]+$")
 ORGANIZER_REVIEW_ROUTE = re.compile(r"^/api/organize/reviews/([A-Za-z0-9-]+)(?:/(retry|next))?$")
 ORGANIZER_BATCH_SIZE = 20
@@ -332,6 +333,76 @@ def apply_plan(raw_plan: object) -> dict:
         "warnings": warnings,
         "summary": summarize_plan(plan, warnings),
         "maintenance": worker().status(),
+    }
+
+
+def _inbox_backup_pending() -> None:
+    if AUTO_BACKUP is not None:
+        AUTO_BACKUP.notify()
+    database().mark_backup_pending()
+
+
+def _inbox_local_save() -> None:
+    worker().notify()
+    _inbox_backup_pending()
+
+
+def process_inbox_item(identifier: str) -> dict:
+    claimed = database().claim_inbox_item(identifier)
+    if claimed["status"] == "succeeded":
+        return {"item": claimed, "status": "succeeded", "message": "这个 Inbox 项目已经入库。"}
+    try:
+        parsed = parse_ai(claimed["text"])
+        plan, warnings, status = database().apply_inbox_plan(identifier, parsed["plan"])
+    except Exception as error:  # noqa: BLE001
+        item = database().fail_inbox_item(identifier, error)
+        _inbox_backup_pending()
+        return {"item": item, "status": "failed", "message": str(error)}
+    item = database().get_inbox_item(identifier)
+    result = {
+        "item": item,
+        "status": status,
+        "warnings": warnings,
+        "summary": summarize_plan(plan, warnings),
+        "message": "AI 已整理并写入本地数据库" if status == "succeeded" else "AI 已整理，请确认需要补充的内容",
+    }
+    if status == "succeeded":
+        _inbox_local_save()
+    else:
+        _inbox_backup_pending()
+    return result
+
+
+def create_inbox(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise WebError("Inbox 格式无效。")
+    item = database().create_inbox_item(
+        payload.get("text", ""),
+        source_provider=str(payload.get("sourceProvider") or "local"),
+        source_id=payload.get("sourceId"),
+    )
+    if item["status"] in {"pending", "failed"}:
+        result = process_inbox_item(item["id"])
+    else:
+        result = {"item": item, "status": item["status"], "message": "这个 Inbox 项目已经处理过。"}
+    return result
+
+
+def apply_inbox_item(identifier: str, payload: object) -> dict:
+    if not isinstance(payload, dict) or "plan" not in payload:
+        raise WebError("Inbox 结果格式无效。")
+    plan, warnings, status = database().apply_inbox_plan(identifier, payload["plan"])
+    item = database().get_inbox_item(identifier)
+    if status == "succeeded":
+        _inbox_local_save()
+    else:
+        _inbox_backup_pending()
+    return {
+        "item": item,
+        "status": status,
+        "warnings": warnings,
+        "summary": summarize_plan(plan, warnings),
+        "message": "Inbox 内容已写入本地数据库" if status == "succeeded" else "仍有内容需要确认",
     }
 
 
@@ -840,6 +911,19 @@ class DailyLogHandler(BaseHTTPRequestHandler):
             except Exception as error:  # noqa: BLE001
                 self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
+        if parsed.path == "/api/inbox":
+            try:
+                self.send_json({"items": database().list_inbox_items()})
+            except Exception as error:  # noqa: BLE001
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        inbox_match = INBOX_ROUTE.fullmatch(parsed.path)
+        if inbox_match and inbox_match.group(2) is None:
+            try:
+                self.send_json(database().get_inbox_item(inbox_match.group(1)))
+            except Exception as error:  # noqa: BLE001
+                self.send_json({"error": str(error)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         if parsed.path == "/api/organize":
             try:
                 query = parse_qs(parsed.query)
@@ -889,6 +973,16 @@ class DailyLogHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/record":
                 self.send_json(apply_plan(payload.get("plan")))
+                return
+            if self.path == "/api/inbox":
+                self.send_json(create_inbox(payload), HTTPStatus.CREATED)
+                return
+            inbox_match = INBOX_ROUTE.fullmatch(urlparse(self.path).path)
+            if inbox_match and inbox_match.group(2) == "process":
+                self.send_json(process_inbox_item(inbox_match.group(1)))
+                return
+            if inbox_match and inbox_match.group(2) == "apply":
+                self.send_json(apply_inbox_item(inbox_match.group(1), payload))
                 return
             if self.path == "/api/onboarding/complete":
                 self.send_json(complete_onboarding(payload))

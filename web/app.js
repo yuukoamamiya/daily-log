@@ -22,6 +22,9 @@ const state = {
   organizerSuggestions: null,
   organizerReview: null,
   organizerLoading: false,
+  inbox: null,
+  inboxDrafts: {},
+  inboxLoading: false,
   searchQuery: "",
   searchReturnRoute: "overview",
   listFilters: { expenseCategory: "", diaryTag: "", todoStatus: "active" },
@@ -56,6 +59,7 @@ let customSelectSequence = 0;
 
 const routeMeta = {
   overview: ["概览", "生活工作台"],
+  inbox: ["Inbox", "待处理的自然语言"],
   calendar: ["日历", "日程与生活轨迹"],
   expenses: ["账目", "消费与预算"],
   diary: ["日记", "每日片段"],
@@ -263,6 +267,7 @@ async function loadData(showLoader = true) {
     updateCategoryOptions();
     render();
     if (state.route === "organize") loadOrganizer();
+    if (state.route === "inbox") loadInbox();
   } catch (error) {
     replaceHtml(viewRoot, `<div class="empty-state"><strong>暂时无法读取数据</strong><p>${escapeHtml(error.message)}</p></div>`);
     toast("读取失败", error.message, true);
@@ -310,6 +315,24 @@ async function loadOrganizer() {
     toast("整理页读取失败", error.message, true);
   } finally {
     state.organizerLoading = false;
+  }
+}
+
+async function loadInbox() {
+  if (state.inboxLoading) return;
+  state.inboxLoading = true;
+  try {
+    const result = await request("/api/inbox");
+    state.inbox = result.items || [];
+    const ids = new Set(state.inbox.map((item) => item.id));
+    for (const id of Object.keys(state.inboxDrafts)) if (!ids.has(id)) delete state.inboxDrafts[id];
+    render();
+  } catch (error) {
+    state.inbox = [];
+    render();
+    toast("Inbox 读取失败", error.message, true);
+  } finally {
+    state.inboxLoading = false;
   }
 }
 
@@ -967,6 +990,163 @@ function renderTodos() {
   return `<div class="view-header"><div><h2>待办清单</h2><p>${active.length} 项进行中，${completed.length} 项已完成</p></div><button class="primary-button" data-open-composer="todo">${icon("plus")}添加待办</button></div><div class="list-filters"><label>显示<select data-list-filter="todoStatus"><option value="active" ${state.listFilters.todoStatus === "active" ? "selected" : ""}>进行中</option><option value="completed" ${state.listFilters.todoStatus === "completed" ? "selected" : ""}>已完成</option><option value="all" ${state.listFilters.todoStatus === "all" ? "selected" : ""}>全部</option></select></label></div>${bulkToolbar("todo", [...active, ...completed])}${bulkPreviewMarkup()}<div class="todo-sections">${section("overdue", "需要处理", "已逾期", "没有逾期待办")}${section("today", "今天", "今天截止", "没有今天截止任务")}${section("upcoming", "接下来", "即将截止", "近期没有截止任务")}${section("undated", "随时可做", "无截止日期", "没有无截止日期")}<section class="card completed-card"><div class="card-head"><div class="card-title"><p>最近完成</p><h3>可以撤销误操作</h3></div></div><div class="todo-page-list">${completedTodoRows(50, { items: completed, selectable: true })}</div></section></div>`;
 }
 
+function inboxStatusLabel(status) {
+  return { pending: "待处理", processing: "处理中", needs_review: "待确认", failed: "处理失败", succeeded: "已入库" }[status] || status;
+}
+
+function inboxPlanCopy(plan) {
+  const labels = [["transactions", "账目"], ["journal", "日记"], ["todos", "待办"], ["calendar", "日程"]];
+  const parts = labels.filter(([key]) => (plan?.[key] || []).length).map(([key, label]) => `${label} ${(plan[key] || []).length} 条`);
+  return parts.join("，") || "还没有可写入的记录";
+}
+
+function cloneInboxPlan(plan) {
+  return JSON.parse(JSON.stringify(plan || { journal: [], transactions: [], todos: [], calendar: [], clarifications: [] }));
+}
+
+function inboxPlanFor(item) {
+  if (!state.inboxDrafts[item.id]) state.inboxDrafts[item.id] = cloneInboxPlan(item.plan);
+  return state.inboxDrafts[item.id];
+}
+
+function inboxInput(kind, index, field, label, value, type = "text", extra = "") {
+  const safeValue = value ?? "";
+  if (type === "textarea") {
+    return `<label>${label}<textarea data-inbox-field data-inbox-kind="${kind}" data-inbox-index="${index}" data-inbox-name="${field}" rows="3">${escapeHtml(safeValue)}</textarea></label>`;
+  }
+  if (type === "checkbox") {
+    return `<label class="check-field inbox-check"><input type="checkbox" data-inbox-field data-inbox-kind="${kind}" data-inbox-index="${index}" data-inbox-name="${field}" ${safeValue ? "checked" : ""}/><span>${label}</span></label>`;
+  }
+  return `<label>${label}<input type="${type}" value="${escapeHtml(safeValue)}" data-inbox-field data-inbox-kind="${kind}" data-inbox-index="${index}" data-inbox-name="${field}" ${extra}/></label>`;
+}
+
+function inboxPlanGroup(kind, title, items, renderItem) {
+  if (!items.length) return "";
+  return `<section class="inbox-plan-group"><div class="inbox-plan-group-head"><strong>${title}</strong><span>${items.length} 条</span></div>${items.map((item, index) => renderItem(item, index)).join("")}</section>`;
+}
+
+function inboxPlanEditor(item) {
+  const plan = inboxPlanFor(item);
+  const clarification = (plan.clarifications || []).length
+    ? `<div class="inbox-clarifications"><strong>需要你确认</strong><ul>${plan.clarifications.map((text) => `<li>${escapeHtml(text)}</li>`).join("")}</ul><p>请补充或修改下面的内容，确认后再入库。</p></div>` : "";
+  const groups = [
+    inboxPlanGroup("transactions", "账目", plan.transactions || [], (value, index) => `<div class="inbox-plan-row">${inboxInput("transactions", index, "date", "日期", value.date, "date")}${inboxInput("transactions", index, "summary", "摘要", value.summary)}${inboxInput("transactions", index, "amount", "金额", value.amount, "number", "step=\"0.01\" min=\"0.01\"")}${inboxInput("transactions", index, "account", "科目", value.account || "expenses", "text", "placeholder=\"expenses:生活\"")}${inboxInput("transactions", index, "note", "备注", value.note, "textarea")}${inboxInput("transactions", index, "budget_excluded", "不计入月度预算", value.budget_excluded, "checkbox")}</div>`),
+    inboxPlanGroup("journal", "日记", plan.journal || [], (value, index) => `<div class="inbox-plan-row">${inboxInput("journal", index, "date", "日期", value.date, "date")}${inboxInput("journal", index, "text", "正文", value.text, "textarea")}${inboxInput("journal", index, "tags", "标签", (value.tags || []).join(" "), "text", "placeholder=\"生活 工作\"")}</div>`),
+    inboxPlanGroup("todos", "待办", plan.todos || [], (value, index) => `<div class="inbox-plan-row">${inboxInput("todos", index, "created_date", "创建日期", value.created_date, "date")}${inboxInput("todos", index, "due_date", "截止日期", value.due_date, "date")}${inboxInput("todos", index, "text", "内容", value.text, "textarea")}${inboxInput("todos", index, "tags", "标签", (value.tags || []).join(" "), "text", "placeholder=\"工作 生活\"")}${inboxInput("todos", index, "action", "动作", value.action || "", "text", "placeholder=\"留空表示新增\"")}</div>`),
+    inboxPlanGroup("calendar", "日程", plan.calendar || [], (value, index) => `<div class="inbox-plan-row">${inboxInput("calendar", index, "date", "日期", value.date, "date")}${inboxInput("calendar", index, "title", "标题", value.title)}${inboxInput("calendar", index, "start_time", "开始时间", value.start_time, "time")}${inboxInput("calendar", index, "end_time", "结束时间", value.end_time, "time")}${inboxInput("calendar", index, "location", "地点", value.location)}${inboxInput("calendar", index, "description", "备注", value.description, "textarea")}${inboxInput("calendar", index, "action", "动作", value.action || "", "text", "placeholder=\"留空表示新增\"")}${value.action === "move" ? inboxInput("calendar", index, "old_date", "原日期", value.old_date, "date") : ""}</div>`),
+  ].join("");
+  return `${clarification}<div class="inbox-plan-editor" data-inbox-editor="${escapeHtml(item.id)}">${groups}</div>`;
+}
+
+function renderInboxItem(item) {
+  const status = inboxStatusLabel(item.status);
+  const statusClass = item.status === "failed" ? "error" : item.status === "needs_review" ? "pending" : item.status === "succeeded" ? "done" : "";
+  const action = item.status === "failed"
+    ? `<button class="primary-button" type="button" data-inbox-process="${escapeHtml(item.id)}">${icon("refresh")}重试</button>`
+    : item.status === "needs_review"
+      ? `<button class="primary-button" type="button" data-inbox-apply="${escapeHtml(item.id)}">${icon("tick")}确认并入库</button>`
+      : item.status === "pending"
+        ? `<button class="primary-button" type="button" data-inbox-process="${escapeHtml(item.id)}">${icon("arrow")}开始处理</button>` : "";
+  const detail = item.status === "needs_review" ? inboxPlanEditor(item) : item.status === "succeeded"
+    ? `<p class="inbox-summary">${escapeHtml(inboxPlanCopy(item.plan))}</p>` : "";
+  const attemptLabel = item.status === "succeeded" ? "处理完成" : item.attempts ? `已尝试 ${item.attempts} 次` : "尚未处理";
+  return `<article class="card inbox-item"><header class="inbox-item-head"><div><span class="inbox-status ${statusClass}">${status}</span><time>${escapeHtml(String(item.updatedAt || "").replace("T", " ").slice(0, 16))}</time></div><small>${attemptLabel}</small></header><div class="inbox-raw"><p>原始输入</p><div>${escapeHtml(item.text)}</div></div>${item.error ? `<div class="inbox-error"><strong>${item.status === "failed" ? "处理没有完成" : "需要确认"}</strong><p>${escapeHtml(item.error)}</p></div>` : ""}${detail}${action ? `<footer class="inbox-item-actions">${action}</footer>` : ""}</article>`;
+}
+
+function renderInbox() {
+  if (!state.inbox) return `<div class="loading-state"><span class="loader"></span><p>正在读取 Inbox…</p></div>`;
+  const items = state.inbox;
+  const pending = items.filter((item) => ["pending", "processing", "needs_review", "failed"].includes(item.status)).length;
+  return `<div class="view-header"><div><h2>Inbox</h2><p>把一段自然语言先放在这里，AI 会整理成账目、日记、待办和日程。</p></div><button class="text-button" type="button" data-inbox-refresh>${icon("refresh")}刷新</button></div><section class="card inbox-compose"><div class="card-head"><div class="card-title"><p>自然语言录入</p><h3>先记下来，稍后确认</h3></div><span class="section-count">${pending} 项待处理</span></div><form id="inbox-form"><textarea name="text" rows="5" maxlength="20000" placeholder="例如：今天午饭 32 元；晚上提醒我给妈妈打电话；周六上午去游泳……" required></textarea><div class="inbox-compose-foot"><p>明确结果会自动入库；有歧义时会保留在这里，等你修改后确认。</p><button class="submit-button dark" type="submit">提交到 Inbox ${icon("arrow")}</button></div></form></section><div class="inbox-list">${items.length ? items.map(renderInboxItem).join("") : `<div class="empty-state"><strong>Inbox 还是空的</strong><p>把想到的事情先写下来，之后再统一整理。</p></div>`}</div>`;
+}
+
+function replaceInboxItem(item) {
+  if (!state.inbox) state.inbox = [];
+  const index = state.inbox.findIndex((entry) => entry.id === item.id);
+  if (index === -1) state.inbox.unshift(item);
+  else state.inbox[index] = item;
+  state.inboxDrafts[item.id] = cloneInboxPlan(item.plan);
+}
+
+async function submitInbox(form) {
+  const button = form.querySelector("button[type=submit]");
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "AI 正在整理…";
+  try {
+    const result = await request("/api/inbox", { method: "POST", body: JSON.stringify({ text: form.elements.text.value }) });
+    replaceInboxItem(result.item);
+    render();
+    if (result.status === "succeeded") toast("Inbox 已入库", result.summary || result.message);
+    else if (result.status === "needs_review") toast("请确认 Inbox 内容", result.item.error || result.message, true, 7000);
+    else toast("Inbox 处理失败", result.item.error || result.message, true, 7000);
+    form.reset();
+    if (result.status === "succeeded") await loadData(false);
+  } catch (error) {
+    toast("Inbox 没有保存", error.message, true, 7000);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+async function processInboxItem(id) {
+  try {
+    const result = await request(`/api/inbox/${id}/process`, { method: "POST", body: JSON.stringify({}) });
+    replaceInboxItem(result.item);
+    render();
+    if (result.status === "succeeded") {
+      toast("Inbox 已入库", result.summary || result.message);
+      await loadData(false);
+    } else if (result.status === "needs_review") {
+      toast("请确认 Inbox 内容", result.item.error || result.message, true, 7000);
+    } else {
+      toast("Inbox 处理失败", result.item.error || result.message, true, 7000);
+    }
+  } catch (error) {
+    toast("Inbox 处理失败", error.message, true, 7000);
+  }
+}
+
+function inboxDraftFromEditor(id) {
+  const item = state.inbox?.find((entry) => entry.id === id);
+  if (!item) return null;
+  const plan = cloneInboxPlan(inboxPlanFor(item));
+  const editor = document.querySelector(`[data-inbox-editor="${id}"]`);
+  if (!editor) return plan;
+  editor.querySelectorAll("[data-inbox-field]").forEach((input) => {
+    const kind = input.dataset.inboxKind;
+    const index = Number(input.dataset.inboxIndex);
+    const field = input.dataset.inboxName;
+    if (!plan[kind]?.[index]) return;
+    const value = input.type === "checkbox" ? input.checked : input.value;
+    plan[kind][index][field] = field === "tags" ? tagsFrom(value) : value;
+  });
+  plan.clarifications = [];
+  return plan;
+}
+
+async function applyInboxItem(id) {
+  const plan = inboxDraftFromEditor(id);
+  if (!plan) return;
+  const button = document.querySelector(`[data-inbox-apply="${id}"]`);
+  if (button) { button.disabled = true; button.textContent = "正在保存…"; }
+  try {
+    const result = await request(`/api/inbox/${id}/apply`, { method: "POST", body: JSON.stringify({ plan }) });
+    replaceInboxItem(result.item);
+    render();
+    if (result.status === "succeeded") {
+      toast("Inbox 已入库", result.summary || result.message);
+      await loadData(false);
+    } else {
+      toast("还不能入库", result.item.error || result.message, true, 7000);
+    }
+  } catch (error) {
+    toast("Inbox 内容无效", error.message, true, 7000);
+    render();
+  }
+}
+
 function renderSettingsBase() {
   if (!state.settings) return `<div class="loading-state"><span class="loader"></span><p>正在读取本机设置…</p></div>`;
   const ai = state.settings.ai;
@@ -1021,7 +1201,7 @@ function render() {
   pageTitle.textContent = title;
   pageEyebrow.textContent = eyebrow;
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.route === state.route));
-  const renderers = { overview: renderOverview, calendar: renderCalendar, expenses: renderExpenses, diary: renderDiary, todos: renderTodos, organize: renderOrganizer, search: renderSearch, settings: renderSettings };
+  const renderers = { overview: renderOverview, inbox: renderInbox, calendar: renderCalendar, expenses: renderExpenses, diary: renderDiary, todos: renderTodos, organize: renderOrganizer, search: renderSearch, settings: renderSettings };
   replaceHtml(viewRoot, renderers[state.route]());
   enhanceCustomSelects(viewRoot);
   renderDayDetails();
@@ -1035,6 +1215,7 @@ function setRoute(route) {
   sidebar.classList.remove("open");
   render();
   if (route === "organize") loadOrganizer();
+  if (route === "inbox") loadInbox();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -1634,6 +1815,11 @@ document.addEventListener("click", (event) => {
   if (routeLink) setRoute(routeLink.dataset.routeLink);
   const opener = event.target.closest("[data-open-composer]");
   if (opener) openComposer(opener.dataset.openComposer);
+  if (event.target.closest("[data-inbox-refresh]")) loadInbox();
+  const inboxProcess = event.target.closest("[data-inbox-process]");
+  if (inboxProcess) processInboxItem(inboxProcess.dataset.inboxProcess);
+  const inboxApply = event.target.closest("[data-inbox-apply]");
+  if (inboxApply) applyInboxItem(inboxApply.dataset.inboxApply);
   const tab = event.target.closest("[data-form]");
   if (tab) selectForm(tab.dataset.form);
   const monthButton = event.target.closest("[data-month-step]");
@@ -1731,6 +1917,7 @@ document.querySelectorAll(".entry-form").forEach((form) => {
 document.addEventListener("submit", (event) => {
   if (event.target.id === "settings-form") { event.preventDefault(); saveSettings(event.target); }
   if (event.target.id === "category-add-form" || event.target.matches(".category-child-form")) { event.preventDefault(); addCategory(event.target); }
+  if (event.target.id === "inbox-form") { event.preventDefault(); submitInbox(event.target); }
 });
 document.addEventListener("change", (event) => {
   if (event.target.id === "backup-backend") toggleBackupFields(event.target.value);
@@ -1787,6 +1974,16 @@ document.addEventListener("input", (event) => {
     const kind = event.target.dataset.organizerKind || "diary";
     state.organizerDrafts[kind][event.target.dataset.organizerId] = event.target.value;
     syncOrganizerApplyButton();
+  }
+  if (event.target.matches("[data-inbox-field]")) {
+    const item = state.inbox?.find((entry) => entry.id === event.target.closest("[data-inbox-editor]")?.dataset.inboxEditor);
+    const kind = event.target.dataset.inboxKind;
+    const index = Number(event.target.dataset.inboxIndex);
+    const field = event.target.dataset.inboxName;
+    if (item && state.inboxDrafts[item.id]?.[kind]?.[index]) {
+      const value = event.target.type === "checkbox" ? event.target.checked : event.target.value;
+      state.inboxDrafts[item.id][kind][index][field] = field === "tags" ? tagsFrom(value) : value;
+    }
   }
 });
 document.querySelector('#form-event [name="allDay"]').addEventListener("change", (event) => {

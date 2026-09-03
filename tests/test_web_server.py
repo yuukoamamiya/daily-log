@@ -119,6 +119,31 @@ class WebServerLocalFirstTest(unittest.TestCase):
         apply_plan.assert_called_once_with(PLAN)
         self.assertEqual(result["message"], "AI 已整理并写入本地数据库")
 
+    def test_inbox_parse_failure_is_kept_for_retry(self):
+        item = {"id": "inbox-1", "text": "一段待整理的话", "status": "pending"}
+        failed = {**item, "status": "failed", "error": "AI 暂时不可用"}
+        self.database.claim_inbox_item.return_value = item
+        self.database.fail_inbox_item.return_value = failed
+        with patch.object(web_server, "parse_ai", side_effect=web_server.WebError("AI 暂时不可用")):
+            result = web_server.process_inbox_item("inbox-1")
+        self.database.claim_inbox_item.assert_called_once_with("inbox-1")
+        self.database.fail_inbox_item.assert_called_once()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["item"]["id"], "inbox-1")
+
+    def test_inbox_clear_plan_is_applied_and_marks_local_backup_pending(self):
+        item = {"id": "inbox-2", "text": "午饭 20 元", "status": "pending"}
+        self.database.create_inbox_item.return_value = item
+        self.database.claim_inbox_item.return_value = {**item, "status": "processing"}
+        self.database.get_inbox_item.return_value = {**item, "status": "succeeded", "plan": PLAN}
+        self.database.apply_inbox_plan.return_value = (PLAN, [], "succeeded")
+        with patch.object(web_server, "parse_ai", return_value={"plan": PLAN}):
+            result = web_server.create_inbox({"text": item["text"]})
+        self.assertEqual(result["status"], "succeeded")
+        self.database.apply_inbox_plan.assert_called_once_with("inbox-2", PLAN)
+        self.worker.notify.assert_called_once()
+        self.database.mark_backup_pending.assert_called_once()
+
     def test_finance_settings_store_budget_in_database(self):
         self.database.set_monthly_budget.return_value = 5000.0
         self.database.get_monthly_budget.return_value = 5000.0

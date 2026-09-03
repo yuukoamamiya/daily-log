@@ -22,7 +22,7 @@ from .models import ACCOUNT_RE, normalize_item, normalize_plan, normalize_tags
 from .storage import CalendarRepository, DiaryRepository, LedgerRepository, TodoRepository
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 DEFAULT_MONTHLY_BUDGET = Decimal("3000.00")
 
 
@@ -170,6 +170,21 @@ class DailyLogDatabase:
                 );
                 CREATE INDEX IF NOT EXISTS idx_outbox_created ON outbox(id);
                 CREATE INDEX IF NOT EXISTS idx_todos_completed ON todos(completed, completed_date);
+                CREATE TABLE IF NOT EXISTS inbox_items (
+                    id TEXT PRIMARY KEY,
+                    raw_text TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'needs_review', 'failed', 'succeeded')),
+                    plan_json TEXT NOT NULL DEFAULT '{}',
+                    last_error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    source_provider TEXT NOT NULL DEFAULT 'local',
+                    source_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(source_provider, source_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_inbox_updated ON inbox_items(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_inbox_status ON inbox_items(status, updated_at DESC);
                 CREATE TABLE IF NOT EXISTS organizer_reviews (
                     id TEXT PRIMARY KEY,
                     scope TEXT NOT NULL,
@@ -369,104 +384,246 @@ class DailyLogDatabase:
             raise NotFoundError("记录不存在或已经发生变化，请刷新后重试。")
         return row
 
+    @staticmethod
+    def _inbox_public(row: sqlite3.Row) -> dict:
+        try:
+            plan = json.loads(row["plan_json"])
+        except (TypeError, json.JSONDecodeError):
+            plan = {}
+        return {
+            "id": row["id"],
+            "text": row["raw_text"],
+            "status": row["status"],
+            "plan": plan,
+            "error": row["last_error"],
+            "attempts": row["attempts"],
+            "sourceProvider": row["source_provider"],
+            "sourceId": row["source_id"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def create_inbox_item(
+        self,
+        raw_text: object,
+        *,
+        source_provider: str = "local",
+        source_id: str | None = None,
+    ) -> dict:
+        text = str(raw_text or "").strip()
+        if not text:
+            raise ValidationError("Inbox 内容不能为空。")
+        if len(text) > 20_000:
+            raise ValidationError("Inbox 内容不能超过 20000 个字符。")
+        provider = str(source_provider or "local").strip()[:120] or "local"
+        source = str(source_id or "").strip()[:500] or None
+        with self.transaction() as connection:
+            if source is not None:
+                existing = connection.execute(
+                    "SELECT * FROM inbox_items WHERE source_provider=? AND source_id=?",
+                    (provider, source),
+                ).fetchone()
+                if existing:
+                    return self._inbox_public(existing)
+            identifier = self._new_id("inbox")
+            stamp = _now()
+            connection.execute(
+                "INSERT INTO inbox_items(id,raw_text,status,source_provider,source_id,created_at,updated_at) "
+                "VALUES(?,?, 'pending', ?, ?, ?, ?)",
+                (identifier, text, provider, source, stamp, stamp),
+            )
+            row = connection.execute("SELECT * FROM inbox_items WHERE id=?", (identifier,)).fetchone()
+        return self._inbox_public(row)
+
+    def get_inbox_item(self, identifier: str) -> dict:
+        with self.session() as connection:
+            row = connection.execute("SELECT * FROM inbox_items WHERE id=?", (identifier,)).fetchone()
+        if row is None:
+            raise NotFoundError("Inbox 项目不存在或已经删除。")
+        return self._inbox_public(row)
+
+    def get_inbox_item_by_source(self, source_provider: object, source_id: object) -> dict | None:
+        """Find a remote Inbox item without creating a duplicate."""
+        provider = str(source_provider or "").strip()[:120]
+        source = str(source_id or "").strip()[:500]
+        if not provider or not source:
+            return None
+        with self.session() as connection:
+            row = connection.execute(
+                "SELECT * FROM inbox_items WHERE source_provider=? AND source_id=?",
+                (provider, source),
+            ).fetchone()
+        return self._inbox_public(row) if row is not None else None
+
+    def list_inbox_items(self, limit: int = 100) -> list[dict]:
+        limit = max(1, min(int(limit), 500))
+        with self.session() as connection:
+            rows = connection.execute(
+                "SELECT * FROM inbox_items ORDER BY updated_at DESC, created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._inbox_public(row) for row in rows]
+
+    def claim_inbox_item(self, identifier: str) -> dict:
+        stamp = _now()
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM inbox_items WHERE id=?", (identifier,)).fetchone()
+            if row is None:
+                raise NotFoundError("Inbox 项目不存在或已经删除。")
+            if row["status"] == "succeeded":
+                return self._inbox_public(row)
+            if row["status"] == "processing":
+                raise ConflictError("这个 Inbox 项目正在处理中，请稍候。")
+            connection.execute(
+                "UPDATE inbox_items SET status='processing',attempts=attempts+1,last_error=NULL,updated_at=? WHERE id=?",
+                (stamp, identifier),
+            )
+            row = connection.execute("SELECT * FROM inbox_items WHERE id=?", (identifier,)).fetchone()
+        return self._inbox_public(row)
+
+    def fail_inbox_item(self, identifier: str, error: object) -> dict:
+        message = str(error or "Inbox 处理失败。")[:2_000]
+        with self.transaction() as connection:
+            row = connection.execute("SELECT id FROM inbox_items WHERE id=?", (identifier,)).fetchone()
+            if row is None:
+                raise NotFoundError("Inbox 项目不存在或已经删除。")
+            connection.execute(
+                "UPDATE inbox_items SET status='failed',last_error=?,updated_at=? WHERE id=?",
+                (message, _now(), identifier),
+            )
+            row = connection.execute("SELECT * FROM inbox_items WHERE id=?", (identifier,)).fetchone()
+        return self._inbox_public(row)
+
+    def apply_inbox_plan(
+        self, identifier: str, raw_plan: object, today: str | None = None
+    ) -> tuple[dict, list[str], str]:
+        today = today or date.today().isoformat()
+        plan = normalize_plan(raw_plan, today)
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM inbox_items WHERE id=?", (identifier,)).fetchone()
+            if row is None:
+                raise NotFoundError("Inbox 项目不存在或已经删除。")
+            if row["status"] == "succeeded":
+                return plan, [], "succeeded"
+            serialized = json.dumps(plan, ensure_ascii=False)
+            if plan["clarifications"]:
+                connection.execute(
+                    "UPDATE inbox_items SET status='needs_review',plan_json=?,last_error=?,updated_at=? WHERE id=?",
+                    (serialized, "；".join(plan["clarifications"])[:2_000], _now(), identifier),
+                )
+                return plan, [], "needs_review"
+            if not any(plan[key] for key in ("transactions", "journal", "todos", "calendar")):
+                raise ValidationError("没有收到可写入的内容。")
+            warnings: list[str] = []
+            self._apply_plan_connection(connection, plan, today, warnings)
+            connection.execute(
+                "UPDATE inbox_items SET status='succeeded',plan_json=?,last_error=NULL,updated_at=? WHERE id=?",
+                (serialized, _now(), identifier),
+            )
+        return plan, warnings, "succeeded"
+
     def apply_plan(self, raw_plan: object, today: str | None = None) -> tuple[dict, list[str]]:
         today = today or date.today().isoformat()
         plan = normalize_plan(raw_plan, today)
         warnings: list[str] = []
         with self.transaction() as connection:
-            for item in plan["transactions"]:
-                existing = connection.execute(
-                    "SELECT id FROM transactions WHERE entry_date=? AND summary=? AND amount=? AND account=?",
-                    (item["date"], item["summary"], item["amount"], item["account"]),
-                ).fetchone()
-                if existing:
-                    continue
-                identifier = self._new_id("transaction")
-                stamp = _now()
-                connection.execute(
-                    "INSERT INTO transactions(id,entry_date,summary,note,amount,account,budget_excluded,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?)",
-                    (identifier, item["date"], item["summary"], item.get("note", ""), item["amount"],
-                     item["account"], int(item.get("budget_excluded", False)), stamp, stamp),
-                )
-                self._ensure_category(connection, item["account"])
-                self._enqueue(connection, "transaction", identifier, "create", item)
-            for item in plan["journal"]:
-                existing = connection.execute(
-                    "SELECT id FROM diary_entries WHERE entry_date=? AND text=?", (item["date"], item["text"])
-                ).fetchone()
-                if existing:
-                    continue
-                identifier = self._new_id("diary")
-                stamp = _now()
-                payload = {**item, "time": "09:00:00 AM"}
-                connection.execute(
-                    "INSERT INTO diary_entries(id,entry_date,entry_time,text,tags_json,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?)",
-                    (identifier, item["date"], payload["time"], item["text"],
-                     json.dumps(item["tags"], ensure_ascii=False), stamp, stamp),
-                )
-                self._enqueue(connection, "diary", identifier, "create", payload)
-            for item in plan["todos"]:
-                action = item.get("action")
-                existing = connection.execute(
-                    "SELECT * FROM todos WHERE created_date=? AND text=? AND completed=0 ORDER BY created_at LIMIT 1",
-                    (item["created_date"], item["text"]),
-                ).fetchone()
-                if action in {"done", "delete", "restore"}:
-                    if action == "restore":
-                        existing = connection.execute(
-                            "SELECT * FROM todos WHERE created_date=? AND text=? AND completed=1 ORDER BY completed_date DESC LIMIT 1",
-                            (item["created_date"], item["text"]),
-                        ).fetchone()
-                    if not existing:
-                        warnings.append(f"待办未找到，未执行{action}: {item['text']}")
-                    elif action == "done":
-                        self._complete_todo(connection, existing["id"], today)
-                    elif action == "restore":
-                        self._restore_todo(connection, existing["id"])
-                    else:
-                        self._delete(connection, "todo", existing["id"])
-                    continue
-                if existing:
-                    continue
-                identifier = self._new_id("todo")
-                stamp = _now()
-                connection.execute(
-                    "INSERT INTO todos(id,created_date,due_date,text,tags_json,completed,completed_date,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,0,NULL,?,?)",
-                    (identifier, item["created_date"], item.get("due_date"), item["text"], json.dumps(item["tags"], ensure_ascii=False),
-                     stamp, stamp),
-                )
-                self._enqueue(connection, "todo", identifier, "create", item)
-            for item in plan["calendar"]:
-                action = item.get("action")
-                source_date = item.get("old_date") if action == "move" else item["date"]
-                existing = connection.execute(
-                    "SELECT * FROM events WHERE event_date=? AND title=? ORDER BY created_at LIMIT 1",
-                    (source_date, item["title"]),
-                ).fetchone()
-                if action in {"move", "delete"}:
-                    if not existing:
-                        warnings.append(f"日程未找到，未执行{action}: {item['title']}")
-                    elif action == "delete":
-                        self._delete(connection, "event", existing["id"])
-                    else:
-                        self._update(connection, "event", existing["id"], item)
-                    continue
-                if existing:
-                    continue
-                identifier = self._new_id("event")
-                uid = uuid.uuid4().hex.upper()
-                stamp = _now()
-                connection.execute(
-                    "INSERT INTO events(id,uid,title,event_date,start_time,end_time,all_day,location,description,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (identifier, uid, item["title"], item["date"], item.get("start_time"), item.get("end_time"),
-                     int(not item.get("start_time")), item.get("location", ""), item.get("description", ""), stamp, stamp),
-                )
-                self._enqueue(connection, "event", identifier, "create", {**item, "uid": uid})
+            self._apply_plan_connection(connection, plan, today, warnings)
         return plan, warnings
+
+    def _apply_plan_connection(
+        self, connection: sqlite3.Connection, plan: dict, today: str, warnings: list[str]
+    ) -> None:
+        for item in plan["transactions"]:
+            existing = connection.execute(
+                "SELECT id FROM transactions WHERE entry_date=? AND summary=? AND amount=? AND account=?",
+                (item["date"], item["summary"], item["amount"], item["account"]),
+            ).fetchone()
+            if existing:
+                continue
+            identifier = self._new_id("transaction")
+            stamp = _now()
+            connection.execute(
+                "INSERT INTO transactions(id,entry_date,summary,note,amount,account,budget_excluded,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (identifier, item["date"], item["summary"], item.get("note", ""), item["amount"],
+                 item["account"], int(item.get("budget_excluded", False)), stamp, stamp),
+            )
+            self._ensure_category(connection, item["account"])
+            self._enqueue(connection, "transaction", identifier, "create", item)
+        for item in plan["journal"]:
+            existing = connection.execute(
+                "SELECT id FROM diary_entries WHERE entry_date=? AND text=?", (item["date"], item["text"])
+            ).fetchone()
+            if existing:
+                continue
+            identifier = self._new_id("diary")
+            stamp = _now()
+            payload = {**item, "time": "09:00:00 AM"}
+            connection.execute(
+                "INSERT INTO diary_entries(id,entry_date,entry_time,text,tags_json,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (identifier, item["date"], payload["time"], item["text"],
+                 json.dumps(item["tags"], ensure_ascii=False), stamp, stamp),
+            )
+            self._enqueue(connection, "diary", identifier, "create", payload)
+        for item in plan["todos"]:
+            action = item.get("action")
+            existing = connection.execute(
+                "SELECT * FROM todos WHERE created_date=? AND text=? AND completed=0 ORDER BY created_at LIMIT 1",
+                (item["created_date"], item["text"]),
+            ).fetchone()
+            if action in {"done", "delete", "restore"}:
+                if action == "restore":
+                    existing = connection.execute(
+                        "SELECT * FROM todos WHERE created_date=? AND text=? AND completed=1 ORDER BY completed_date DESC LIMIT 1",
+                        (item["created_date"], item["text"]),
+                    ).fetchone()
+                if not existing:
+                    warnings.append(f"待办未找到，未执行{action}: {item['text']}")
+                elif action == "done":
+                    self._complete_todo(connection, existing["id"], today)
+                elif action == "restore":
+                    self._restore_todo(connection, existing["id"])
+                else:
+                    self._delete(connection, "todo", existing["id"])
+                continue
+            if existing:
+                continue
+            identifier = self._new_id("todo")
+            stamp = _now()
+            connection.execute(
+                "INSERT INTO todos(id,created_date,due_date,text,tags_json,completed,completed_date,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,0,NULL,?,?)",
+                (identifier, item["created_date"], item.get("due_date"), item["text"], json.dumps(item["tags"], ensure_ascii=False),
+                 stamp, stamp),
+            )
+            self._enqueue(connection, "todo", identifier, "create", item)
+        for item in plan["calendar"]:
+            action = item.get("action")
+            source_date = item.get("old_date") if action == "move" else item["date"]
+            existing = connection.execute(
+                "SELECT * FROM events WHERE event_date=? AND title=? ORDER BY created_at LIMIT 1",
+                (source_date, item["title"]),
+            ).fetchone()
+            if action in {"move", "delete"}:
+                if not existing:
+                    warnings.append(f"日程未找到，未执行{action}: {item['title']}")
+                elif action == "delete":
+                    self._delete(connection, "event", existing["id"])
+                else:
+                    self._update(connection, "event", existing["id"], item)
+                continue
+            if existing:
+                continue
+            identifier = self._new_id("event")
+            uid = uuid.uuid4().hex.upper()
+            stamp = _now()
+            connection.execute(
+                "INSERT INTO events(id,uid,title,event_date,start_time,end_time,all_day,location,description,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (identifier, uid, item["title"], item["date"], item.get("start_time"), item.get("end_time"),
+                 int(not item.get("start_time")), item.get("location", ""), item.get("description", ""), stamp, stamp),
+            )
+            self._enqueue(connection, "event", identifier, "create", {**item, "uid": uid})
 
     def update(self, kind: str, identifier: str, raw_item: object, today: str | None = None) -> dict:
         item = normalize_item(kind, raw_item, today or date.today().isoformat())

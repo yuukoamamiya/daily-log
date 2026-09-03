@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import sqlite3
+from unittest.mock import patch
 from pathlib import Path
 
 from daily_log.database import DailyLogDatabase
@@ -78,6 +79,61 @@ class DatabaseProjectionTest(unittest.TestCase):
         self.assertEqual(projected_todo["dueDate"], "2026-08-05")
         self.assertIn("due:2026-08-05", projected_todo["rawText"])
         self.assertTrue(any(item["title"] == "开会" for item in CalendarRepository(self.root).list()))
+
+    def test_inbox_keeps_clarifications_until_confirmed(self):
+        transaction_count = len(self.database.list_transactions())
+        item = self.database.create_inbox_item("今天花了 20 元，但我不确定分类")
+        plan = {
+            "transactions": [{"date": "2026-08-02", "summary": "午饭", "amount": "20", "account": "expenses"}],
+            "journal": [], "todos": [], "calendar": [],
+            "clarifications": ["请确认这笔支出的分类"],
+        }
+        _, _, status = self.database.apply_inbox_plan(item["id"], plan, "2026-08-02")
+        self.assertEqual(status, "needs_review")
+        self.assertEqual(self.database.get_inbox_item(item["id"])["status"], "needs_review")
+        self.assertEqual(len(self.database.list_transactions()), transaction_count)
+
+        plan["clarifications"] = []
+        _, _, status = self.database.apply_inbox_plan(item["id"], plan, "2026-08-02")
+        self.assertEqual(status, "succeeded")
+        self.assertEqual(self.database.get_inbox_item(item["id"])["status"], "succeeded")
+        self.assertEqual(self.database.list_transactions()[0]["summary"], "午饭")
+
+    def test_inbox_source_identity_is_idempotent(self):
+        first = self.database.create_inbox_item(
+            "来自远程的一段话", source_provider="test-provider", source_id="remote-42"
+        )
+        second = self.database.create_inbox_item(
+            "同一个远程项目的新文本", source_provider="test-provider", source_id="remote-42"
+        )
+        self.assertEqual(second["id"], first["id"])
+        self.assertEqual(second["text"], "来自远程的一段话")
+
+    def test_inbox_multi_module_apply_rolls_back_together(self):
+        transaction_count = len(self.database.list_transactions())
+        diary_count = len(self.database.list_diary())
+        item = self.database.create_inbox_item("午饭和日记")
+        plan = {
+            "transactions": [{"date": "2026-08-02", "summary": "午饭", "amount": "20", "account": "expenses"}],
+            "journal": [{"date": "2026-08-02", "text": "今天很平静", "tags": []}],
+            "todos": [], "calendar": [], "clarifications": [],
+        }
+        self.database.claim_inbox_item(item["id"])
+        original_enqueue = self.database._enqueue
+        calls = 0
+
+        def fail_on_second(connection, kind, identifier, action, payload):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("模拟写入失败")
+            original_enqueue(connection, kind, identifier, action, payload)
+
+        with patch.object(self.database, "_enqueue", side_effect=fail_on_second):
+            with self.assertRaisesRegex(RuntimeError, "模拟写入失败"):
+                self.database.apply_inbox_plan(item["id"], plan, "2026-08-02")
+        self.assertEqual(len(self.database.list_transactions()), transaction_count)
+        self.assertEqual(len(self.database.list_diary()), diary_count)
 
     def test_edit_complete_restore_and_delete_keep_stable_database_id(self):
         todo = self.database.list_todos()[0]
